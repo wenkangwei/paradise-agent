@@ -117,11 +117,21 @@ fun ChatInputBar(
 
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri -> if (uri != null) onAddAttachment(uri.toString(), guessMime(uri)) }
+    ) { uri ->
+        if (uri != null) {
+            val mime = context.contentResolver.getType(uri) ?: guessMime(uri)
+            onAddAttachment(uri.toString(), mime)
+        }
+    }
 
     val fileLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
-    ) { uri -> if (uri != null) onAddAttachment(uri.toString(), guessMime(uri)) }
+    ) { uri ->
+        if (uri != null) {
+            val mime = context.contentResolver.getType(uri) ?: guessMime(uri)
+            onAddAttachment(uri.toString(), mime)
+        }
+    }
 
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
@@ -394,18 +404,36 @@ private fun guessMime(uri: Uri): String {
         "jpg", "jpeg" -> "image/jpeg"
         "gif" -> "image/gif"
         "webp" -> "image/webp"
+        "bmp" -> "image/bmp"
+        "heic", "heif" -> "image/heic"
+        "svg" -> "image/svg+xml"
         "pdf" -> "application/pdf"
-        "txt" -> "text/plain"
+        "txt", "log", "ini", "cfg" -> "text/plain"
+        "md" -> "text/markdown"
         "json" -> "application/json"
-        "mp4" -> "video/mp4"
+        "xml" -> "application/xml"
+        "csv" -> "text/csv"
+        "mp4", "m4v" -> "video/mp4"
+        "mkv" -> "video/x-matroska"
+        "webm" -> "video/webm"
+        "mov" -> "video/quicktime"
         "mp3" -> "audio/mpeg"
+        "flac" -> "audio/flac"
+        "wav" -> "audio/wav"
+        "aac" -> "audio/aac"
+        "ogg" -> "audio/ogg"
+        "m4a" -> "audio/mp4"
         "doc" -> "application/msword"
         "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         "xls" -> "application/vnd.ms-excel"
         "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         "ppt" -> "application/vnd.ms-powerpoint"
         "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        "csv" -> "text/csv"
+        "zip" -> "application/zip"
+        "rar" -> "application/x-rar-compressed"
+        "7z" -> "application/x-7z-compressed"
+        "tar" -> "application/x-tar"
+        "gz" -> "application/gzip"
         else -> "application/octet-stream"
     }
 }

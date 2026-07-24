@@ -105,8 +105,9 @@ fun ChatScreen(
                 is ChatEvent.ShowError -> {
                     val result = snackbarHostState.showSnackbar(
                         message = event.message,
-                        actionLabel = event.retryAction?.let { "Retry" },
-                        withDismissAction = event.retryAction == null
+                        actionLabel = event.retryAction?.let { "重试" } ?: "关闭",
+                        withDismissAction = true,
+                        duration = androidx.compose.material3.SnackbarDuration.Short
                     )
                     if (result == SnackbarResult.ActionPerformed) {
                         event.retryAction?.invoke()
@@ -186,7 +187,13 @@ fun ChatScreen(
             },
             // Intentionally NO bottomBar — input floats over chat with transparent
             // background, no divider line drawn by Scaffold.
-            snackbarHost = { SnackbarHost(snackbarHostState) }
+            snackbarHost = {
+                SnackbarHost(
+                    hostState = snackbarHostState,
+                    // Push above the floating input bar so the snackbar never hides it
+                    modifier = Modifier.padding(bottom = 84.dp)
+                )
+            }
         ) { innerPadding ->
             Box(
                 modifier = Modifier

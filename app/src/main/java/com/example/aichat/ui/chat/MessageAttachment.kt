@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -20,10 +19,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.PictureAsPdf
-import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -33,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
@@ -45,11 +45,8 @@ import com.example.aichat.ui.chat.model.Attachment
  *
  *   - Images / videos → 2-column grid of equal-size square thumbnails (max 2 rows)
  *   - Other files     → vertical list of [FileAttachmentCard] rows showing
- *                       icon + filename, so the user always knows what's there
- *
- * Previously the whole attachment list was rendered as a single image Row,
- * which left non-image files as blank boxes. This split fixes that and gives
- * each attachment type a recognizable affordance.
+ *                       a WPS-style colored icon + filename, so the user
+ *                       always knows what's there
  */
 @Composable
 fun MessageAttachmentList(
@@ -58,8 +55,8 @@ fun MessageAttachmentList(
 ) {
     if (attachments.isEmpty()) return
 
-    val images = attachments.filter { it.mimeType.startsWith("image/") }
-    val files = attachments.filterNot { it.mimeType.startsWith("image/") }
+    val images = attachments.filter { it.isImage }
+    val files = attachments.filterNot { it.isImage }
 
     Column(modifier = modifier.fillMaxWidth()) {
         if (images.isNotEmpty()) {
@@ -74,9 +71,14 @@ fun MessageAttachmentList(
     }
 }
 
+/** Image classification by MIME type and extension fallback. */
+private val Attachment.isImage: Boolean
+    get() = mimeType.startsWith("image/") || extension() in IMAGE_EXTENSIONS
+
+private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif", "svg")
+
 @Composable
 private fun ImageGrid(images: List<Attachment>) {
-    // LazyHorizontalGrid needs a fixed height; show up to 2 rows of 2 columns = 4 thumbs
     val rows = if (images.size <= 2) 1 else 2
     val cellMinSize = 120.dp
     LazyHorizontalGrid(
@@ -105,6 +107,7 @@ private fun ImageGrid(images: List<Attachment>) {
 
 @Composable
 private fun FileAttachmentCard(attachment: Attachment) {
+    val appearance = fileAppearance(attachment)
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -119,16 +122,16 @@ private fun FileAttachmentCard(attachment: Attachment) {
         ) {
             Box(
                 modifier = Modifier
-                    .size(32.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(appearance.tintColor.copy(alpha = 0.12f)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = iconFor(attachment.mimeType),
+                    imageVector = appearance.icon,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
+                    tint = appearance.tintColor,
+                    modifier = Modifier.size(22.dp)
                 )
             }
             Spacer(Modifier.width(10.dp))
@@ -141,43 +144,79 @@ private fun FileAttachmentCard(attachment: Attachment) {
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = friendlyTypeLabel(attachment.mimeType),
+                    text = appearance.label,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = appearance.tintColor
                 )
             }
         }
     }
 }
 
-private fun iconFor(mime: String): ImageVector = when {
-    mime.startsWith("image/") -> Icons.Filled.Image
-    mime.startsWith("video/") -> Icons.Filled.VideoFile
-    mime.startsWith("audio/") -> Icons.Filled.AudioFile
-    mime == "application/pdf" -> Icons.Filled.PictureAsPdf
-    mime.startsWith("text/") -> Icons.Filled.Description
-    mime.contains("word") || mime.contains("document") -> Icons.Filled.Description
-    mime.contains("sheet") || mime.contains("excel") -> Icons.Filled.Description
-    mime.contains("presentation") || mime.contains("powerpoint") -> Icons.Filled.Description
-    mime.contains("zip") || mime.contains("compressed") || mime.contains("tar") -> Icons.Filled.Folder
-    else -> Icons.Filled.InsertDriveFile
+private data class FileAppearance(
+    val icon: ImageVector,
+    val tintColor: Color,
+    val label: String
+)
+
+private fun fileAppearance(attachment: Attachment): FileAppearance {
+    val ext = attachment.extension()
+    val mime = attachment.mimeType.lowercase()
+
+    return when {
+        // Images (only for non-image attachments that slipped through, e.g. image/* saved as octet-stream)
+        ext in IMAGE_EXTENSIONS || mime.startsWith("image/") ->
+            FileAppearance(Icons.Filled.Image, Color(0xFFE91E63), "图片")
+
+        // PDF
+        mime == "application/pdf" || ext == "pdf" ->
+            FileAppearance(Icons.Filled.PictureAsPdf, Color(0xFFF44336), "PDF 文档")
+
+        // Word
+        ext in setOf("doc", "docx") || mime.contains("word") ->
+            FileAppearance(Icons.Filled.Description, Color(0xFF2196F3), "Word 文档")
+
+        // Excel / CSV
+        ext in setOf("xls", "xlsx", "csv") ||
+            mime.contains("excel") || mime.contains("sheet") ||
+            mime == "text/csv" ->
+            FileAppearance(Icons.Filled.GridOn, Color(0xFF4CAF50), "表格")
+
+        // PPT
+        ext in setOf("ppt", "pptx") ||
+            mime.contains("presentation") || mime.contains("powerpoint") ->
+            FileAppearance(Icons.Filled.Description, Color(0xFFFF9800), "PPT 幻灯片")
+
+        // Text
+        ext in setOf("txt", "md", "log", "json", "xml", "yaml", "yml", "cfg", "ini") ||
+            (mime.startsWith("text/") && ext != "csv") ->
+            FileAppearance(Icons.Filled.Description, Color(0xFF607D8B), "文本文件")
+
+        // Archive
+        ext in setOf("zip", "rar", "7z", "tar", "gz", "bz2") ||
+            mime.contains("zip") || mime.contains("compressed") ->
+            FileAppearance(Icons.Filled.Folder, Color(0xFF795548), "压缩包")
+
+        // Audio
+        mime.startsWith("audio/") || ext in setOf("mp3", "flac", "wav", "aac", "ogg", "m4a") ->
+            FileAppearance(Icons.Filled.AudioFile, Color(0xFF00BCD4), "音频")
+
+        // Video
+        mime.startsWith("video/") || ext in setOf("mp4", "mkv", "webm", "mov", "m4v") ->
+            FileAppearance(Icons.Filled.VideoFile, Color(0xFF9C27B0), "视频")
+
+        // Default
+        else -> FileAppearance(Icons.Filled.InsertDriveFile, Color(0xFF9E9E9E), "文件")
+    }
 }
 
-private fun friendlyTypeLabel(mime: String): String = when {
-    mime.startsWith("image/") -> "图片"
-    mime.startsWith("video/") -> "视频"
-    mime.startsWith("audio/") -> "音频"
-    mime == "application/pdf" -> "PDF 文档"
-    mime.startsWith("text/") -> "文本"
-    mime.contains("word") || mime.contains("document") -> "Word 文档"
-    mime.contains("sheet") || mime.contains("excel") -> "Excel 表格"
-    mime.contains("presentation") || mime.contains("powerpoint") -> "PPT 幻灯片"
-    mime.contains("zip") || mime.contains("compressed") -> "压缩包"
-    mime == "application/octet-stream" -> "文件"
-    else -> "文件"
+/** Extract extension from filename first, then URI last segment. */
+private fun Attachment.extension(): String {
+    val name = displayName.ifBlank { uri.substringAfterLast('/').substringBefore('?') }
+    return name.substringAfterLast('.', "").lowercase()
 }
 
 private fun fallbackName(attachment: Attachment): String {
-    val ext = attachment.mimeType.substringAfter('/').takeIf { it.isNotBlank() }?.let { ".$it" }.orEmpty()
+    val ext = attachment.extension().let { if (it.isNotBlank()) ".$it" else "" }
     return "附件$ext"
 }
