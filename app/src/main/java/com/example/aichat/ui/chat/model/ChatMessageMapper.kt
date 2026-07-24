@@ -22,7 +22,8 @@ fun Message.toChatMessage(): ChatMessage {
         isStreaming = false,
         attachments = attachments.map { it.toUiAttachment() },
         reasoningContent = reasoningContent,
-        metadata = metadata
+        metadata = metadata,
+        reaction = reaction
     )
 }
 

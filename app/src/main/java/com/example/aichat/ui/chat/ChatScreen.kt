@@ -1,8 +1,15 @@
 package com.example.aichat.ui.chat
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,8 +20,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Menu
@@ -37,6 +47,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,7 +56,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -63,12 +77,25 @@ fun ChatScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val keyboard = LocalSoftwareKeyboardController.current
 
     // Auto-scroll to bottom when new messages arrive or streaming content updates
     LaunchedEffect(uiState.messages.lastOrNull()?.content, uiState.messages.size) {
         if (uiState.messages.isNotEmpty()) {
             listState.animateScrollToItem(uiState.messages.lastIndex)
         }
+    }
+
+    // Show "scroll-to-bottom" button when the last visible item isn't the last message
+    val showScrollDown by remember {
+        derivedStateOf {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val total = uiState.messages.size
+            total > 1 && lastVisible in 0 until (total - 1)
+        }
+    }
+    val showScrollUp by remember {
+        derivedStateOf { listState.firstVisibleItemIndex > 0 }
     }
 
     // Handle one-time events
@@ -126,6 +153,7 @@ fun ChatScreen(
                         ProfileSelector(
                             profiles = uiState.profiles,
                             activeProfile = uiState.activeProfile,
+                            conversationTitle = uiState.currentConversationTitle,
                             onSelect = { id -> viewModel.selectApiProfile(id) },
                             onManageProfiles = onNavigateToSettings
                         )
@@ -173,7 +201,13 @@ fun ChatScreen(
                 } else {
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            // Dismiss the IME on any vertical drag so the bottom of
+                            // the list isn't hidden behind the keyboard-covered input pill.
+                            .pointerInput(Unit) {
+                                detectVerticalDragGestures { _, _ -> keyboard?.hide() }
+                            },
                         // Reserve bottom space so messages aren't hidden behind the floating pill
                         contentPadding = PaddingValues(
                             start = 12.dp,
@@ -187,9 +221,52 @@ fun ChatScreen(
                             items = uiState.messages,
                             key = { it.id }
                         ) { message ->
-                            MessageBubble(message = message)
+                            MessageBubble(
+                                message = message,
+                                onReact = { r -> viewModel.setMessageReaction(message.id, r) }
+                            )
                         }
                     }
+                }
+
+                // Floating scroll-to-top button (top-right of the list area)
+                AnimatedVisibility(
+                    visible = showScrollUp,
+                    enter = fadeIn() + scaleIn(initialScale = 0.7f),
+                    exit = fadeOut() + scaleOut(targetScale = 0.7f),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 8.dp, end = 16.dp)
+                ) {
+                    ScrollFab(
+                        icon = Icons.Filled.ArrowUpward,
+                        contentDescription = "回到顶部",
+                        onClick = {
+                            scope.launch { listState.animateScrollToItem(0) }
+                        }
+                    )
+                }
+
+                // Floating scroll-to-bottom button (above the input pill)
+                AnimatedVisibility(
+                    visible = showScrollDown,
+                    enter = fadeIn() + scaleIn(initialScale = 0.7f),
+                    exit = fadeOut() + scaleOut(targetScale = 0.7f),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(bottom = 84.dp, end = 16.dp)
+                ) {
+                    ScrollFab(
+                        icon = Icons.Filled.ArrowDownward,
+                        contentDescription = "回到底部",
+                        onClick = {
+                            if (uiState.messages.isNotEmpty()) {
+                                scope.launch {
+                                    listState.animateScrollToItem(uiState.messages.lastIndex)
+                                }
+                            }
+                        }
+                    )
                 }
 
                 // Floating input pill — overlaid at the bottom of the chat
@@ -215,51 +292,81 @@ fun ChatScreen(
     }
 }
 
+@Composable
+private fun ScrollFab(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.primaryContainer,
+        tonalElevation = 3.dp,
+        shadowElevation = 4.dp,
+        modifier = Modifier.size(40.dp)
+    ) {
+        IconButton(onClick = onClick) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+        }
+    }
+}
+
 /**
- * Replaces the static "AI Chat" title with a dropdown that:
- *   - shows the active profile title + model
- *   - on tap, lists all configured profiles (live-updates as user adds/edits)
- *   - clicking a profile switches the active one instantly (no restart —
- *     LlmProviderFactory cache invalidates by profile id)
- *   - "管理 API 配置" item navigates to the settings page
+ * TopAppBar title — two-line Kimi-style layout:
+ *   - Primary: conversation topic (or profile title if no conversation yet)
+ *   - Subtitle: profile title · model name
+ * Tapping the title opens the API profile switcher dropdown.
  */
 @Composable
 private fun ProfileSelector(
     profiles: List<ApiProfile>,
     activeProfile: ApiProfile?,
+    conversationTitle: String?,
     onSelect: (String) -> Unit,
     onManageProfiles: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
-    val title = activeProfile?.title ?: "未配置 API"
-    val subtitle = activeProfile?.modelName
+    val profileTitle = activeProfile?.title ?: "未配置 API"
+    val modelName = activeProfile?.modelName
+    val primary = conversationTitle?.takeIf { it.isNotBlank() } ?: profileTitle
+    // When a conversation title is shown, subtitle lists the profile too; otherwise
+    // subtitle is just the model name (so primary and subtitle don't duplicate).
+    val secondary = if (conversationTitle.isNullOrBlank()) {
+        modelName
+    } else {
+        listOfNotNull(profileTitle, modelName)
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString(" · ")
+    }
 
     Box {
-        Row(
+        Column(
             modifier = Modifier
                 .clip(RoundedCornerShape(8.dp))
                 .clickable { expanded = true }
-                .padding(end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(end = 4.dp)
         ) {
             Text(
-                text = title,
+                text = primary,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            if (subtitle.isNullOrBlank().not()) {
+            if (!secondary.isNullOrBlank()) {
                 Spacer(Modifier.size(2.dp))
                 Text(
-                    text = "· $subtitle",
+                    text = secondary,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-            Icon(
-                imageVector = Icons.Filled.ArrowDropDown,
-                contentDescription = "切换 API 配置",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
         DropdownMenu(
             expanded = expanded,

@@ -21,6 +21,7 @@ import com.example.aichat.ui.chat.model.toChatMessages
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -73,7 +74,18 @@ class ChatViewModel @Inject constructor(
     private fun observeConversations() {
         viewModelScope.launch {
             repository.observeConversations().collect { conversations ->
-                _uiState.update { it.copy(conversations = conversations) }
+                _uiState.update { state ->
+                    // Sync currentConversationTitle from the up-to-date conversation row
+                    // (covers both external rename and our LLM-generated title write-back).
+                    val currentTitle = state.currentConversationId?.let { id ->
+                        conversations.firstOrNull { it.id == id }?.title
+                            ?.takeIf { it.isNotBlank() && it != "New Conversation" }
+                    }
+                    state.copy(
+                        conversations = conversations,
+                        currentConversationTitle = currentTitle ?: state.currentConversationTitle
+                    )
+                }
             }
         }
     }
@@ -117,16 +129,25 @@ class ChatViewModel @Inject constructor(
 
                 val now = System.currentTimeMillis()
 
-                val domainAttachments = if (sendAttachments.isNotEmpty()) {
+                // Persist attachments to app-internal storage (filesDir/attachments/)
+                // and store ONLY the file path in Room. This avoids the 2 MB CursorWindow
+                // cap that bit us when we stored base64 data URLs inline.
+                // Also rewrite the UI attachment URIs to the file paths so the displayed
+                // message bubble renders from the same file the DB references.
+                val persistedAttachments = if (sendAttachments.isNotEmpty()) {
                     sendAttachments.map { uiAtt ->
-                        val dataUrl = AttachmentEncoder.toDataUrl(context, Uri.parse(uiAtt.uri))
-                        com.example.aichat.domain.model.Attachment(
-                            id = uiAtt.id,
-                            mimeType = uiAtt.mimeType,
-                            uri = dataUrl
-                        )
+                        val filePath = AttachmentEncoder.persist(context, Uri.parse(uiAtt.uri))
+                        uiAtt.copy(uri = filePath)
                     }
                 } else emptyList()
+
+                val domainAttachments = persistedAttachments.map { uiAtt ->
+                    com.example.aichat.domain.model.Attachment(
+                        id = uiAtt.id,
+                        mimeType = uiAtt.mimeType,
+                        uri = uiAtt.uri
+                    )
+                }
 
                 val userMessage = Message(
                     id = UUID.randomUUID().toString(),
@@ -142,7 +163,7 @@ class ChatViewModel @Inject constructor(
                     id = userMessage.id,
                     role = com.example.aichat.ui.chat.model.Role.USER,
                     content = trimmed,
-                    attachments = sendAttachments
+                    attachments = persistedAttachments
                 )
 
                 val currentMessages = repository.getMessages(conversationId)
@@ -175,10 +196,14 @@ class ChatViewModel @Inject constructor(
 
                 try {
                     val stream = if (hasAnyAttachments) {
+                        // Convert file paths to base64 data URLs ONLY for the HTTP
+                        // request body. This is ephemeral — the base64 string lives
+                        // only in memory and is never persisted to Room.
                         val multimodalMessages = fullHistory.map { msg ->
                             val remoteAttachments = msg.attachments.map { domainAtt ->
+                                val dataUrl = AttachmentEncoder.toDataUrl(domainAtt.uri)
                                 com.example.aichat.data.remote.Attachment(
-                                    url = domainAtt.uri,
+                                    url = dataUrl,
                                     mimeType = domainAtt.mimeType
                                 )
                             }
@@ -253,6 +278,19 @@ class ChatViewModel @Inject constructor(
 
                 if (status == MessageStatus.COMPLETE) {
                     _events.emit(ChatEvent.MessageSent)
+                    // Generate conversation title from the first user message —
+                    // async, best-effort. Falls back to first 15 chars on any error.
+                    val firstUserMessage = trimmed
+                    val convId = conversationId
+                    viewModelScope.launch(Dispatchers.IO) {
+                        val messages = runCatching { repository.getMessages(convId) }
+                            .getOrDefault(emptyList())
+                        if (messages.count { it.role == Role.USER } <= 1) {
+                            val title = generateTitle(firstUserMessage)
+                            runCatching { repository.renameConversation(convId, title) }
+                            _uiState.update { it.copy(currentConversationTitle = title) }
+                        }
+                    }
                 }
             } catch (e: ApiException) {
                 handleError(e.message ?: "API request failed", text, sendAttachments)
@@ -337,6 +375,7 @@ class ChatViewModel @Inject constructor(
             it.copy(
                 messages = emptyList(),
                 currentConversationId = null,
+                currentConversationTitle = null,
                 error = null,
                 isLoading = false,
                 isStreaming = false,
@@ -347,9 +386,13 @@ class ChatViewModel @Inject constructor(
 
     fun selectConversation(conversationId: String) {
         stopGenerating()
+        val title = _uiState.value.conversations
+            .firstOrNull { it.id == conversationId }?.title
+            ?.takeIf { it.isNotBlank() && it != "New Conversation" }
         _uiState.update {
             it.copy(
                 currentConversationId = conversationId,
+                currentConversationTitle = title,
                 error = null,
                 isLoading = false,
                 isStreaming = false,
@@ -369,6 +412,67 @@ class ChatViewModel @Inject constructor(
             } catch (e: Exception) {
                 _events.emit(ChatEvent.ShowError("Failed to delete conversation", null))
             }
+        }
+    }
+
+    /**
+     * Toggle AI-message feedback ("like" / "dislike"). Pressing the same reaction
+     * again clears it. Optimistic UI update + background persist.
+     */
+    fun setMessageReaction(messageId: String, reaction: String) {
+        var newValue: String? = null
+        _uiState.update { state ->
+            val updated = state.messages.map { msg ->
+                if (msg.id == messageId) {
+                    newValue = if (msg.reaction == reaction) null else reaction
+                    msg.copy(reaction = newValue)
+                } else msg
+            }
+            state.copy(messages = updated)
+        }
+        viewModelScope.launch {
+            runCatching { repository.setMessageReaction(messageId, newValue) }
+        }
+    }
+
+    /**
+     * Asks the active LLM to summarize the user's first message into ≤15 chars.
+     * Reuses the streaming path — collect until the stream closes, concatenate
+     * content deltas, strip whitespace/newlines, hard-truncate to 15 chars.
+     * Any error → fallback to first 15 chars of the raw message.
+     */
+    private suspend fun generateTitle(firstUserMessage: String): String {
+        val system = Message(
+            id = UUID.randomUUID().toString(),
+            conversationId = "",
+            role = Role.SYSTEM,
+            content = "用不超过15个中文字符概括下面用户输入的主题。直接输出标题文字，" +
+                "不要引号、不要标点、不要任何前缀（例如『标题：』）。",
+            timestamp = System.currentTimeMillis()
+        )
+        val user = Message(
+            id = UUID.randomUUID().toString(),
+            conversationId = "",
+            role = Role.USER,
+            content = firstUserMessage,
+            timestamp = System.currentTimeMillis()
+        )
+        val builder = StringBuilder()
+        return try {
+            remoteDataSource.streamChat(listOf(system, user)).collect { event ->
+                if (event is StreamEvent.ContentDelta) builder.append(event.text)
+            }
+            val cleaned = builder.toString()
+                .trim()
+                .lines()
+                .joinToString("")
+                .replace("\"", "")
+                .replace("「", "")
+                .replace("」", "")
+                .take(15)
+            if (cleaned.isBlank()) firstUserMessage.trim().take(15) else cleaned
+        } catch (e: Exception) {
+            firstUserMessage.trim().take(15)
         }
     }
 

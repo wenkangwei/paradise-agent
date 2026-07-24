@@ -9,7 +9,8 @@ data class ChatMessage(
     val isStreaming: Boolean = false,
     val attachments: List<Attachment> = emptyList(),
     val reasoningContent: String? = null,
-    val metadata: MessageMetadata? = null
+    val metadata: MessageMetadata? = null,
+    val reaction: String? = null
 )
 
 data class Attachment(

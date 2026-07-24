@@ -75,6 +75,11 @@ class ChatRepositoryImpl @Inject constructor(
         conversationDao.getById(id)?.let { conversationDao.delete(it) }
     }
 
+    override suspend fun setMessageReaction(messageId: String, reaction: String?) =
+        withContext(ioDispatcher) {
+            messageDao.updateReaction(messageId, reaction)
+        }
+
     private fun deriveTitle(content: String): String {
         val trimmed = content.trim().take(50)
         return if (trimmed.isEmpty()) "New Conversation" else trimmed

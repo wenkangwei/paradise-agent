@@ -30,7 +30,8 @@ fun MessageEntity.toDomain(): Message = Message(
     attachments = parseAttachments(attachmentsJson),
     status = runCatching { MessageStatus.valueOf(status) }.getOrDefault(MessageStatus.COMPLETE),
     reasoningContent = reasoningContent,
-    metadata = metadataJson?.let(::parseMetadata)
+    metadata = metadataJson?.let(::parseMetadata),
+    reaction = reaction
 )
 
 fun Message.toEntity(): MessageEntity = MessageEntity(
@@ -42,7 +43,8 @@ fun Message.toEntity(): MessageEntity = MessageEntity(
     attachmentsJson = gson.toJson(attachments),
     status = status.name,
     reasoningContent = reasoningContent,
-    metadataJson = metadata?.let { gson.toJson(it) }
+    metadataJson = metadata?.let { gson.toJson(it) },
+    reaction = reaction
 )
 
 fun Conversation.toEntity(): ConversationEntity = ConversationEntity(

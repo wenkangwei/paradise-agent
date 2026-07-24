@@ -21,4 +21,7 @@ interface ChatRepository {
     suspend fun renameConversation(id: String, title: String)
 
     suspend fun deleteConversation(id: String)
+
+    /** Set or clear AI message feedback: "like" | "dislike" | null. */
+    suspend fun setMessageReaction(messageId: String, reaction: String?)
 }

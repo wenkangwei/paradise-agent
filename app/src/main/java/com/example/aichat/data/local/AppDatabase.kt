@@ -19,7 +19,7 @@ import com.example.aichat.data.local.entity.MessageEntity
         ApiProfileEntity::class,
         AgentProfileEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 @TypeConverters(AttachmentConverter::class)

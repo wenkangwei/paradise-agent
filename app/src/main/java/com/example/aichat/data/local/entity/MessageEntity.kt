@@ -26,5 +26,10 @@ data class MessageEntity(
     val attachmentsJson: String = "[]",
     val status: String = "COMPLETE",
     val reasoningContent: String? = null,
-    val metadataJson: String? = null
+    val metadataJson: String? = null,
+    /**
+     * User feedback on AI messages: "like" | "dislike" | null.
+     * Null on user messages. Added in v6 (MIGRATION_5_6).
+     */
+    val reaction: String? = null
 )

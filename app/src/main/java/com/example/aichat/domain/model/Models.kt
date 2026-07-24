@@ -23,7 +23,8 @@ data class Message(
     val attachments: List<Attachment> = emptyList(),
     val status: MessageStatus = MessageStatus.COMPLETE,
     val reasoningContent: String? = null,
-    val metadata: MessageMetadata? = null
+    val metadata: MessageMetadata? = null,
+    val reaction: String? = null
 )
 
 enum class Role { USER, ASSISTANT, SYSTEM }

@@ -79,5 +79,15 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
     }
 }
 
-/** All migrations from the initial v2 schema to the current v5. */
-val ALL_MIGRATIONS = arrayOf(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+/**
+ * v5 → v6: Add `reaction` column to messages for AI message feedback
+ * ("like" / "dislike" / null). User messages keep null.
+ */
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE messages ADD COLUMN reaction TEXT")
+    }
+}
+
+/** All migrations from the initial v2 schema to the current v6. */
+val ALL_MIGRATIONS = arrayOf(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)

@@ -11,6 +11,8 @@ data class ChatUiState(
     val isStreaming: Boolean = false,
     val error: String? = null,
     val currentConversationId: String? = null,
+    /** Title of the active conversation — shown as TopAppBar primary line. */
+    val currentConversationTitle: String? = null,
     val conversations: List<Conversation> = emptyList(),
     val pendingAttachments: List<Attachment> = emptyList(),
     val profiles: List<ApiProfile> = emptyList(),
