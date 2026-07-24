@@ -1,0 +1,11 @@
+<resources>
+    <style name="Theme.AiChat" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">?android:attr/colorBackground</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <style name="Theme.AiChat.Splash" parent="Theme.AiChat">
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>

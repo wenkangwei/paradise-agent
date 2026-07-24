@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+build/
+
+# Local config
+local.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Keystore
+*.jks
+*.keystore
+
+# Logs
+*.log

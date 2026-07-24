@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">AI Chat</string>
+
+    <!-- Chat -->
+    <string name="chat_title">AI Chat</string>
+    <string name="chat_placeholder">Chat screen placeholder</string>
+    <string name="chat_input_hint">Type a message…</string>
+    <string name="chat_send">Send</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_base_url">Base URL</string>
+    <string name="settings_api_key">API Key</string>
+    <string name="settings_model">Model</string>
+    <string name="settings_save">Save</string>
+    <string name="settings_test_connection">Test Connection</string>
+    <string name="settings_saved">Settings saved</string>
+</resources>
