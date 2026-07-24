@@ -71,7 +71,7 @@ class ChatRepositoryImpl @Inject constructor(
         conversationDao.rename(id, title)
     }
 
-    override suspend fun deleteConversation(id: String) = withContext(ioDispatcher) {
+    override suspend fun deleteConversation(id: String): Unit = withContext(ioDispatcher) {
         conversationDao.getById(id)?.let { conversationDao.delete(it) }
     }
 

@@ -2,7 +2,10 @@ package com.example.aichat.di
 
 import android.content.Context
 import androidx.room.Room
+import com.example.aichat.data.local.ALL_MIGRATIONS
 import com.example.aichat.data.local.AppDatabase
+import com.example.aichat.data.local.dao.AgentProfileDao
+import com.example.aichat.data.local.dao.ApiProfileDao
 import com.example.aichat.data.local.dao.ConversationDao
 import com.example.aichat.data.local.dao.MessageDao
 import dagger.Module
@@ -24,7 +27,8 @@ object DatabaseModule {
         context,
         AppDatabase::class.java,
         "aichat.db"
-    ).fallbackToDestructiveMigration()
+    )
+        .addMigrations(*ALL_MIGRATIONS)
         .build()
 
     @Provides
@@ -32,4 +36,10 @@ object DatabaseModule {
 
     @Provides
     fun provideMessageDao(db: AppDatabase): MessageDao = db.messageDao()
+
+    @Provides
+    fun provideApiProfileDao(db: AppDatabase): ApiProfileDao = db.apiProfileDao()
+
+    @Provides
+    fun provideAgentProfileDao(db: AppDatabase): AgentProfileDao = db.agentProfileDao()
 }

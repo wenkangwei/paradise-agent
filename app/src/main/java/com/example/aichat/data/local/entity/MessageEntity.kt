@@ -23,5 +23,8 @@ data class MessageEntity(
     val role: String,
     val content: String,
     val timestamp: Long,
-    val attachmentsJson: String = "[]"
+    val attachmentsJson: String = "[]",
+    val status: String = "COMPLETE",
+    val reasoningContent: String? = null,
+    val metadataJson: String? = null
 )

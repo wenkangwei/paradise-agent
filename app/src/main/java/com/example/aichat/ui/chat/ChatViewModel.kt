@@ -4,11 +4,15 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.aichat.data.provider.StreamEvent
 import com.example.aichat.data.remote.ApiException
 import com.example.aichat.data.remote.AttachmentEncoder
 import com.example.aichat.data.remote.ChatRemoteDataSource
 import com.example.aichat.data.remote.NetworkException
+import com.example.aichat.data.repository.ApiProfileRepository
 import com.example.aichat.domain.model.Message
+import com.example.aichat.domain.model.MessageMetadata
+import com.example.aichat.domain.model.MessageStatus
 import com.example.aichat.domain.model.Role
 import com.example.aichat.domain.repository.ChatRepository
 import com.example.aichat.ui.chat.model.Attachment
@@ -18,6 +22,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -25,14 +30,17 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 @HiltViewModel
 class ChatViewModel @Inject constructor(
     private val repository: ChatRepository,
     private val remoteDataSource: ChatRemoteDataSource,
+    private val apiProfileRepo: ApiProfileRepository,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
@@ -47,6 +55,19 @@ class ChatViewModel @Inject constructor(
 
     init {
         observeConversations()
+        observeApiProfiles()
+    }
+
+    private fun observeApiProfiles() {
+        viewModelScope.launch {
+            combine(apiProfileRepo.observeAll(), apiProfileRepo.observeActive()) { all, active ->
+                _uiState.update { it.copy(profiles = all, activeProfile = active) }
+            }.collect { /* state updated inside combine block */ }
+        }
+    }
+
+    fun selectApiProfile(id: String) {
+        viewModelScope.launch { apiProfileRepo.setActive(id) }
     }
 
     private fun observeConversations() {
@@ -71,11 +92,11 @@ class ChatViewModel @Inject constructor(
     /**
      * Send a user message with optional image attachments and stream the AI response.
      *
-     * Attachment encoding flow:
-     * 1. UI attachments have content:// URIs (from PickVisualMedia)
-     * 2. AttachmentEncoder.toDataUrl() converts them to base64 data URLs
-     * 3. Domain Message is created with encoded attachments and persisted to Room
-     * 4. streamChatMultimodal sends text + image_url parts to the API
+     * The stream emits [StreamEvent]s — content deltas are appended to the
+     * visible message, reasoning deltas are surfaced separately so the UI can
+     * render them in a collapsible section (Phase 2 will wire that UI),
+     * and the final status is persisted as [MessageStatus.INTERRUPTED] if the
+     * user cancelled mid-stream (partial content is still saved).
      */
     fun sendMessage(text: String, attachments: List<Attachment> = emptyList()) {
         val trimmed = text.trim()
@@ -83,7 +104,6 @@ class ChatViewModel @Inject constructor(
         val hasContent = trimmed.isNotBlank() || sendAttachments.isNotEmpty()
         if (!hasContent || _uiState.value.isLoading) return
 
-        // Clear pending attachments
         _uiState.update { it.copy(pendingAttachments = emptyList()) }
 
         streamingJob = viewModelScope.launch {
@@ -97,7 +117,6 @@ class ChatViewModel @Inject constructor(
 
                 val now = System.currentTimeMillis()
 
-                // Encode attachments to base64 data URLs for persistence and API
                 val domainAttachments = if (sendAttachments.isNotEmpty()) {
                     sendAttachments.map { uiAtt ->
                         val dataUrl = AttachmentEncoder.toDataUrl(context, Uri.parse(uiAtt.uri))
@@ -107,11 +126,8 @@ class ChatViewModel @Inject constructor(
                             uri = dataUrl
                         )
                     }
-                } else {
-                    emptyList()
-                }
+                } else emptyList()
 
-                // Persist user message with encoded attachments
                 val userMessage = Message(
                     id = UUID.randomUUID().toString(),
                     conversationId = conversationId,
@@ -122,7 +138,6 @@ class ChatViewModel @Inject constructor(
                 )
                 repository.appendMessage(userMessage)
 
-                // Show user message in UI (use original content:// URIs for display)
                 val userChatMessage = ChatMessage(
                     id = userMessage.id,
                     role = com.example.aichat.ui.chat.model.Role.USER,
@@ -150,16 +165,16 @@ class ChatViewModel @Inject constructor(
                     )
                 }
 
-                // Build context from persisted messages for API call
                 val fullHistory = repository.getMessages(conversationId)
-
-                // Use multimodal endpoint if any message has attachments
                 val hasAnyAttachments = fullHistory.any { it.attachments.isNotEmpty() }
 
                 val contentBuilder = StringBuilder()
-                val streamCompleted = try {
-                    if (hasAnyAttachments) {
-                        // Build pairs of (Message, List<RemoteAttachment>) for multimodal API
+                val reasoningBuilder = StringBuilder()
+                // null = unknown; true = Finish received; false = cancelled before Finish
+                var finishedNormally: Boolean? = null
+
+                try {
+                    val stream = if (hasAnyAttachments) {
                         val multimodalMessages = fullHistory.map { msg ->
                             val remoteAttachments = msg.attachments.map { domainAtt ->
                                 com.example.aichat.data.remote.Attachment(
@@ -169,32 +184,66 @@ class ChatViewModel @Inject constructor(
                             }
                             msg to remoteAttachments
                         }
-                        remoteDataSource.streamChatMultimodal(multimodalMessages).collectLatest { token ->
-                            contentBuilder.append(token)
-                            updateStreamingContent(aiMessageId, contentBuilder.toString())
-                        }
+                        remoteDataSource.streamChatMultimodal(multimodalMessages)
                     } else {
-                        remoteDataSource.streamChat(fullHistory).collectLatest { token ->
-                            contentBuilder.append(token)
-                            updateStreamingContent(aiMessageId, contentBuilder.toString())
+                        remoteDataSource.streamChat(fullHistory)
+                    }
+
+                    stream.collect { event ->
+                        when (event) {
+                            is StreamEvent.ContentDelta -> {
+                                contentBuilder.append(event.text)
+                                updateStreamingContent(
+                                    aiMessageId,
+                                    contentBuilder.toString(),
+                                    reasoningBuilder.toString()
+                                )
+                            }
+                            is StreamEvent.ReasoningDelta -> {
+                                reasoningBuilder.append(event.text)
+                                updateStreamingContent(
+                                    aiMessageId,
+                                    contentBuilder.toString(),
+                                    reasoningBuilder.toString()
+                                )
+                            }
+                            is StreamEvent.Finish -> {
+                                finishedNormally = true
+                            }
+                            is StreamEvent.ToolCall -> {
+                                // Reserved for future tool-calling support
+                            }
+                            is StreamEvent.Cancelled -> {
+                                finishedNormally = false
+                            }
                         }
                     }
-                    true
                 } catch (e: kotlinx.coroutines.CancellationException) {
-                    false
+                    finishedNormally = false
                 }
 
-                // Persist AI message
+                // Persist AI message — partial content is saved even when interrupted
                 val finalContent = contentBuilder.toString()
-                if (finalContent.isNotBlank()) {
+                val finalReasoning = reasoningBuilder.toString().ifBlank { null }
+                val status = when (finishedNormally) {
+                    true -> MessageStatus.COMPLETE
+                    false -> MessageStatus.INTERRUPTED
+                    null -> MessageStatus.COMPLETE // stream closed without explicit Finish
+                }
+                if (finalContent.isNotBlank() || finalReasoning != null) {
                     val aiMessage = Message(
                         id = aiMessageId,
                         conversationId = conversationId,
                         role = Role.ASSISTANT,
                         content = finalContent,
-                        timestamp = System.currentTimeMillis()
+                        timestamp = System.currentTimeMillis(),
+                        status = status,
+                        reasoningContent = finalReasoning,
+                        metadata = if (status == MessageStatus.INTERRUPTED) {
+                            MessageMetadata(interruptedReason = "user_cancelled")
+                        } else null
                     )
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    withContext(NonCancellable) {
                         repository.appendMessage(aiMessage)
                     }
                 }
@@ -202,35 +251,39 @@ class ChatViewModel @Inject constructor(
                 _uiState.update { it.copy(isStreaming = false) }
                 observeMessages(conversationId)
 
-                if (streamCompleted) {
+                if (status == MessageStatus.COMPLETE) {
                     _events.emit(ChatEvent.MessageSent)
                 }
-
             } catch (e: ApiException) {
-                val errorMsg = e.message ?: "API request failed"
-                _uiState.update { it.copy(error = errorMsg, isStreaming = false) }
-                _events.emit(ChatEvent.ShowError(errorMsg) { sendMessage(text, sendAttachments) })
-                removeStreamingPlaceholder()
+                handleError(e.message ?: "API request failed", text, sendAttachments)
             } catch (e: NetworkException) {
-                val errorMsg = e.message ?: "Network error"
-                _uiState.update { it.copy(error = errorMsg, isStreaming = false) }
-                _events.emit(ChatEvent.ShowError(errorMsg) { sendMessage(text, sendAttachments) })
-                removeStreamingPlaceholder()
+                handleError(e.message ?: "Network error", text, sendAttachments)
             } catch (e: Exception) {
-                val errorMsg = e.message ?: "Unexpected error"
-                _uiState.update { it.copy(error = errorMsg, isStreaming = false) }
-                _events.emit(ChatEvent.ShowError(errorMsg, null))
-                removeStreamingPlaceholder()
+                handleError(e.message ?: "Unexpected error", text, sendAttachments, retryable = false)
             } finally {
                 _uiState.update { it.copy(isLoading = false) }
             }
         }
     }
 
+    private suspend fun handleError(
+        message: String,
+        originalText: String,
+        originalAttachments: List<Attachment>,
+        retryable: Boolean = true
+    ) {
+        _uiState.update { it.copy(error = message, isStreaming = false) }
+        val retry: (() -> Unit)? = if (retryable) {
+            { sendMessage(originalText, originalAttachments) }
+        } else null
+        _events.emit(ChatEvent.ShowError(message, retry))
+        removeStreamingPlaceholder()
+    }
+
     /**
-     * Update the streaming AI message content in the UI state.
+     * Update the streaming AI message content/reasoning in the UI state.
      */
-    private fun updateStreamingContent(aiMessageId: String, content: String) {
+    private fun updateStreamingContent(aiMessageId: String, content: String, reasoning: String) {
         _uiState.update { state ->
             val updatedMessages = state.messages.map { msg ->
                 if (msg.id == aiMessageId) {
@@ -268,6 +321,10 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /**
+     * User-initiated stop. Cancels the streaming job; partial content will be
+     * saved by the cancelled coroutine's `withContext(NonCancellable)` block.
+     */
     fun stopGenerating() {
         streamingJob?.cancel()
         _uiState.update { it.copy(isLoading = false) }

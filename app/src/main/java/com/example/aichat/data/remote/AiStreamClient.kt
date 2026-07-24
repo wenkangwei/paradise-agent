@@ -1,5 +1,6 @@
 package com.example.aichat.data.remote
 
+import com.example.aichat.data.provider.StreamEvent
 import com.example.aichat.data.remote.dto.ChatStreamChunkDto
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
@@ -7,52 +8,63 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import okhttp3.ResponseBody
+import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
  * Parses a streaming SSE response from the chat completions endpoint.
  *
  * Reads the [ResponseBody] line by line, extracts JSON payloads from `data:` lines,
- * parses them as [ChatStreamChunkDto], and emits each non-null content delta.
+ * parses them as [ChatStreamChunkDto], and emits structured [StreamEvent]s:
+ *  - [StreamEvent.ContentDelta] for normal token deltas
+ *  - [StreamEvent.ReasoningDelta] for `reasoning_content` (DeepSeek-R1, Qwen3, ...)
+ *  - [StreamEvent.Finish] when `finish_reason` arrives or `[DONE]` is seen
  *
- * The returned Flow is cancellable: cancelling collection closes the response body
- * and the underlying connection.
+ * Cancellation semantics: when the collector cancels, the coroutine is cancelled
+ * and the `finally` block closes the response body. The emitted [StreamEvent.Cancelled]
+ * is *not* sent here — the caller (ChatRemoteDataSource / LlmProvider) decides whether
+ * to emit it based on whether any content was accumulated before cancellation.
  */
-class AiStreamClient {
+@Singleton
+class AiStreamClient @Inject constructor() {
 
     private val gson = Gson()
 
     /**
-     * Converts a streaming [ResponseBody] into a Flow of content token strings.
+     * Converts a streaming [ResponseBody] into a [Flow] of [StreamEvent]s.
      *
-     * Uses [flow] builder which supports cancellation at each `emit` suspension point.
-     * When the collector cancels (e.g., via `collectLatest` in ViewModel), the coroutine
-     * is cancelled and the `finally` block closes the response body.
+     * Replaces the old `toTokenFlow(): Flow<String>` — callers now discriminate
+     * between content, reasoning and finish events instead of receiving raw tokens.
      */
-    fun toTokenFlow(responseBody: ResponseBody): Flow<String> = flow {
+    fun toEventFlow(responseBody: ResponseBody): Flow<StreamEvent> = flow {
         try {
             val source = responseBody.source()
+            var finishEmitted = false
             while (true) {
                 val line = source.readUtf8Line() ?: break
 
-                // Skip empty lines (SSE event delimiters)
                 if (line.isBlank()) continue
-
-                // Only process data lines
                 if (!line.startsWith("data:", ignoreCase = true)) continue
 
                 val payload = line.removePrefix("data:").trim()
+                if (payload == "[DONE]") {
+                    if (!finishEmitted) emit(StreamEvent.Finish(reason = null))
+                    break
+                }
 
-                // [DONE] signals end of stream
-                if (payload == "[DONE]") break
-
-                // Parse JSON chunk and extract content delta
                 val chunk = runCatching {
                     gson.fromJson(payload, ChatStreamChunkDto::class.java)
-                }.getOrNull()
+                }.getOrNull() ?: continue
 
-                val delta = chunk?.contentDelta
-                if (!delta.isNullOrEmpty()) {
-                    emit(delta)
+                chunk.reasoningDelta?.takeIf { it.isNotEmpty() }?.let {
+                    emit(StreamEvent.ReasoningDelta(text = it))
+                }
+                chunk.contentDelta?.takeIf { it.isNotEmpty() }?.let {
+                    emit(StreamEvent.ContentDelta(text = it))
+                }
+                chunk.finishReason?.let { reason ->
+                    finishEmitted = true
+                    emit(StreamEvent.Finish(reason = reason))
                 }
             }
         } finally {

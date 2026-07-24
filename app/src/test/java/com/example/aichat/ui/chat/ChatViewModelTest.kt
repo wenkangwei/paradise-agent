@@ -2,6 +2,7 @@ package com.example.aichat.ui.chat
 
 import android.content.Context
 import app.cash.turbine.test
+import com.example.aichat.data.provider.StreamEvent
 import com.example.aichat.data.remote.ApiException
 import com.example.aichat.data.remote.AttachmentEncoder
 import com.example.aichat.data.remote.ChatRemoteDataSource
@@ -41,17 +42,9 @@ import org.junit.Test
 /**
  * JVM unit tests for [ChatViewModel].
  *
- * Tests cover:
- * - sendMessage with text-only and multimodal attachments
- * - stopGenerating cancellation
- * - Error handling (NetworkException, ApiException, generic)
- * - newChat / selectConversation / deleteConversation
- * - Pending attachment management
- *
- * Framework: JUnit4 + MockK + kotlinx-coroutines-test + Turbine
- *
- * Note: streamChat/streamChatMultimodal return Flow<String> (not suspend),
- * so we use `every {}` (not coEvery) to mock them.
+ * The stream contract is now `Flow<StreamEvent>` (was `Flow<String>`). Tests
+ * emit [StreamEvent.ContentDelta] / [StreamEvent.ReasoningDelta] / [StreamEvent.Finish]
+ * to exercise the new dispatch logic in sendMessage.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModelTest {
@@ -76,28 +69,22 @@ class ChatViewModelTest {
         Dispatchers.resetMain()
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 1: sendMessage(text) - first send creates conversation, streams response
-    // ---------------------------------------------------------------------------
+    private fun contentFlow(vararg tokens: String) =
+        flowOf(*tokens.map { StreamEvent.ContentDelta(it) }.toTypedArray(), StreamEvent.Finish("stop"))
+
     @Test
     fun `sendMessage first send creates conversation and streams AI response`() = runTest(testDispatcher) {
-        // Arrange
         val conversationId = "conv-1"
         coEvery { repository.createConversation() } returns conversationId
         coEvery { repository.getMessages(conversationId) } returns emptyList()
         coEvery { repository.observeMessages(conversationId) } returns flowOf(emptyList())
         every { repository.observeConversations() } returns flowOf(emptyList())
-        // streamChat returns a Flow (not suspend), use every {}
-        every { remoteDataSource.streamChat(any(), any()) } returns flowOf("Hello", " ", "World")
+        every { remoteDataSource.streamChat(any(), any()) } returns contentFlow("Hello", " ", "World")
 
-        // Act
         viewModel.sendMessage("Hi")
         advanceUntilIdle()
 
-        // Assert
-        // User message + AI message persisted
         coVerify(exactly = 2) { repository.appendMessage(any()) }
-
         val state = viewModel.uiState.value
         val aiMessage = state.messages.lastOrNull()
         assertNotNull(aiMessage)
@@ -106,17 +93,11 @@ class ChatViewModelTest {
         assertFalse(state.isLoading)
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 2: sendMessage with attachments uses multimodal endpoint
-    // ---------------------------------------------------------------------------
     @Test
     fun `sendMessage with attachments calls streamChatMultimodal not streamChat`() = runTest(testDispatcher) {
-        // Arrange
         val conversationId = "conv-2"
         coEvery { repository.createConversation() } returns conversationId
 
-        // After persisting the user message with attachments, getMessages returns history with attachments
-        // The exact id doesn't matter - what matters is that attachments are present to trigger multimodal
         val userMessage = Message(
             id = "test-user-msg",
             conversationId = conversationId,
@@ -128,13 +109,12 @@ class ChatViewModelTest {
             )
         )
 
-        // Return messages with attachments when getMessages is called
         coEvery { repository.getMessages(conversationId) } returns listOf(userMessage)
         coEvery { repository.observeMessages(conversationId) } returns flowOf(listOf(userMessage))
         every { repository.observeConversations() } returns flowOf(emptyList())
-
         coEvery { AttachmentEncoder.toDataUrl(any(), any()) } returns "data:image/jpeg;base64,abc123"
-        every { remoteDataSource.streamChatMultimodal(any(), any()) } returns flowOf("Nice", " ", "image")
+        every { remoteDataSource.streamChatMultimodal(any(), any()) } returns
+            flowOf(StreamEvent.ContentDelta("Nice"), StreamEvent.ContentDelta(" image"), StreamEvent.Finish(null))
 
         val attachment = com.example.aichat.ui.chat.model.Attachment(
             id = "att-1",
@@ -143,78 +123,55 @@ class ChatViewModelTest {
             displayName = "pic.jpg"
         )
 
-        // Act
         viewModel.sendMessage("Check this image", listOf(attachment))
         advanceUntilIdle()
 
-        // Assert
         verify { remoteDataSource.streamChatMultimodal(any(), any()) }
         verify(exactly = 0) { remoteDataSource.streamChat(any(), any()) }
 
-        val state = viewModel.uiState.value
-        val aiMessage = state.messages.lastOrNull()
+        val aiMessage = viewModel.uiState.value.messages.lastOrNull()
         assertNotNull(aiMessage)
         assertEquals("Nice image", aiMessage?.content)
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 3: stopGenerating cancels streaming and persists partial content
-    // ---------------------------------------------------------------------------
     @Test
     fun `stopGenerating cancels stream and persists partial content`() = runTest(testDispatcher) {
-        // Arrange
         val conversationId = "conv-3"
         coEvery { repository.createConversation() } returns conversationId
         coEvery { repository.getMessages(conversationId) } returns emptyList()
         coEvery { repository.observeMessages(conversationId) } returns flowOf(emptyList())
         every { repository.observeConversations() } returns flowOf(emptyList())
 
-        // Simulate a slow stream: emits "Part" then "ial", then hangs on delay
         every { remoteDataSource.streamChat(any(), any()) } returns flow {
-            emit("Part")
-            emit("ial")
-            delay(60000) // Long delay - will be cancelled by stopGenerating
+            emit(StreamEvent.ContentDelta("Part"))
+            emit(StreamEvent.ContentDelta("ial"))
+            delay(60000)
         }
 
-        // Act - start sending, let the stream emit tokens but not complete the delay
         viewModel.sendMessage("Tell me a story")
-        // advanceTimeBy runs scheduled coroutines up to 5s virtual time.
-        // The stream emits "Part" and "ial" immediately, then suspends on delay(60000).
-        // At 5s virtual time, the stream is still suspended in delay.
         advanceTimeBy(5000)
 
-        // Verify streaming content has been received
         val midStreamMessages = viewModel.uiState.value.messages
         assertTrue("Stream should have started", midStreamMessages.isNotEmpty())
 
         viewModel.stopGenerating()
         advanceUntilIdle()
 
-        // Assert
         assertFalse(viewModel.uiState.value.isLoading)
-
-        // Should have persisted: user message + partial AI message (with "Partial" content)
-        // The "Partial" content (from "Part" + "ial") should have been saved via NonCancellable
         coVerify(atLeast = 2) { repository.appendMessage(any()) }
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 4: NetworkException produces ShowError event with retryAction
-    // ---------------------------------------------------------------------------
     @Test
     fun `sendMessage NetworkException emits ShowError with retry`() = runTest(testDispatcher) {
-        // Arrange
         val conversationId = "conv-4"
         coEvery { repository.createConversation() } returns conversationId
         coEvery { repository.getMessages(conversationId) } returns emptyList()
         coEvery { repository.observeMessages(conversationId) } returns flowOf(emptyList())
         every { repository.observeConversations() } returns flowOf(emptyList())
-        // streamChat returns a Flow that throws when collected
         every { remoteDataSource.streamChat(any(), any()) } returns flow {
             throw NetworkException("Connection failed")
         }
 
-        // Act & Assert via Turbine
         viewModel.events.test {
             viewModel.sendMessage("Hello")
             advanceUntilIdle()
@@ -225,20 +182,14 @@ class ChatViewModelTest {
             assertEquals("Connection failed", showError.message)
             assertNotNull(showError.retryAction)
 
-            // State should have error set and not loading
             assertFalse(viewModel.uiState.value.isLoading)
             assertEquals("Connection failed", viewModel.uiState.value.error)
-
             cancelAndConsumeRemainingEvents()
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 4b: ApiException produces ShowError event with retryAction
-    // ---------------------------------------------------------------------------
     @Test
     fun `sendMessage ApiException emits ShowError with retry`() = runTest(testDispatcher) {
-        // Arrange
         val conversationId = "conv-5"
         coEvery { repository.createConversation() } returns conversationId
         coEvery { repository.getMessages(conversationId) } returns emptyList()
@@ -248,7 +199,6 @@ class ChatViewModelTest {
             throw ApiException("HTTP 500")
         }
 
-        // Act & Assert
         viewModel.events.test {
             viewModel.sendMessage("Hello")
             advanceUntilIdle()
@@ -258,17 +208,12 @@ class ChatViewModelTest {
             val showError = event as ChatEvent.ShowError
             assertEquals("HTTP 500", showError.message)
             assertNotNull(showError.retryAction)
-
             cancelAndConsumeRemainingEvents()
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 4c: Generic exception produces ShowError with null retryAction
-    // ---------------------------------------------------------------------------
     @Test
     fun `sendMessage generic exception emits ShowError without retry`() = runTest(testDispatcher) {
-        // Arrange
         val conversationId = "conv-6"
         coEvery { repository.createConversation() } returns conversationId
         coEvery { repository.getMessages(conversationId) } returns emptyList()
@@ -278,7 +223,6 @@ class ChatViewModelTest {
             throw RuntimeException("Unexpected")
         }
 
-        // Act & Assert
         viewModel.events.test {
             viewModel.sendMessage("Hello")
             advanceUntilIdle()
@@ -288,35 +232,26 @@ class ChatViewModelTest {
             val showError = event as ChatEvent.ShowError
             assertEquals("Unexpected", showError.message)
             assertNull(showError.retryAction)
-
             cancelAndConsumeRemainingEvents()
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 5: newChat() resets UI state
-    // ---------------------------------------------------------------------------
     @Test
     fun `newChat clears messages and conversationId`() = runTest(testDispatcher) {
-        // Arrange - set up some state first
         val conversationId = "conv-7"
         coEvery { repository.createConversation() } returns conversationId
         coEvery { repository.getMessages(conversationId) } returns emptyList()
         coEvery { repository.observeMessages(conversationId) } returns flowOf(emptyList())
         every { repository.observeConversations() } returns flowOf(emptyList())
-        every { remoteDataSource.streamChat(any(), any()) } returns flowOf("Response")
+        every { remoteDataSource.streamChat(any(), any()) } returns contentFlow("Response")
 
         viewModel.sendMessage("Hello")
         advanceUntilIdle()
-
-        // Sanity: messages should be non-empty
         assertTrue(viewModel.uiState.value.messages.isNotEmpty())
 
-        // Act
         viewModel.newChat()
         advanceUntilIdle()
 
-        // Assert
         val state = viewModel.uiState.value
         assertTrue(state.messages.isEmpty())
         assertNull(state.currentConversationId)
@@ -326,12 +261,8 @@ class ChatViewModelTest {
         assertTrue(state.pendingAttachments.isEmpty())
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 6: selectConversation(id) loads messages from repository
-    // ---------------------------------------------------------------------------
     @Test
     fun `selectConversation loads messages from repository`() = runTest(testDispatcher) {
-        // Arrange
         val conversationId = "conv-8"
         val messages = listOf(
             Message("m1", conversationId, Role.USER, "Hello", 1000L),
@@ -340,11 +271,9 @@ class ChatViewModelTest {
         coEvery { repository.observeMessages(conversationId) } returns flowOf(messages)
         every { repository.observeConversations() } returns flowOf(emptyList())
 
-        // Act
         viewModel.selectConversation(conversationId)
         advanceUntilIdle()
 
-        // Assert
         assertEquals(conversationId, viewModel.uiState.value.currentConversationId)
         assertEquals(2, viewModel.uiState.value.messages.size)
         assertEquals("Hello", viewModel.uiState.value.messages[0].content)
@@ -352,15 +281,9 @@ class ChatViewModelTest {
         assertFalse(viewModel.uiState.value.isLoading)
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 7: addPendingAttachment / removePendingAttachment / clearPendingAttachments
-    // ---------------------------------------------------------------------------
     @Test
     fun `addPendingAttachment adds to pendingAttachments`() {
-        // Act
         viewModel.addPendingAttachment("content://media/1", "image/png")
-
-        // Assert
         assertEquals(1, viewModel.uiState.value.pendingAttachments.size)
         assertEquals("content://media/1", viewModel.uiState.value.pendingAttachments[0].uri)
         assertEquals("image/png", viewModel.uiState.value.pendingAttachments[0].mimeType)
@@ -368,36 +291,22 @@ class ChatViewModelTest {
 
     @Test
     fun `removePendingAttachment removes from pendingAttachments`() {
-        // Arrange
         viewModel.addPendingAttachment("content://media/1", "image/png")
         val id = viewModel.uiState.value.pendingAttachments[0].id
-
-        // Act
         viewModel.removePendingAttachment(id)
-
-        // Assert
         assertTrue(viewModel.uiState.value.pendingAttachments.isEmpty())
     }
 
     @Test
     fun `clearPendingAttachments removes all pending`() {
-        // Arrange
         viewModel.addPendingAttachment("content://media/1", "image/png")
         viewModel.addPendingAttachment("content://media/2", "image/jpeg")
-
-        // Act
         viewModel.clearPendingAttachments()
-
-        // Assert
         assertTrue(viewModel.uiState.value.pendingAttachments.isEmpty())
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 8: clearError resets error state
-    // ---------------------------------------------------------------------------
     @Test
     fun `clearError sets error to null`() = runTest(testDispatcher) {
-        // Arrange - trigger an error
         val conversationId = "conv-9"
         coEvery { repository.createConversation() } returns conversationId
         coEvery { repository.getMessages(conversationId) } returns emptyList()
@@ -411,48 +320,31 @@ class ChatViewModelTest {
         advanceUntilIdle()
         assertNotNull(viewModel.uiState.value.error)
 
-        // Act
         viewModel.clearError()
-
-        // Assert
         assertNull(viewModel.uiState.value.error)
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 9: sendMessage ignores blank text with no attachments
-    // ---------------------------------------------------------------------------
     @Test
     fun `sendMessage with blank text and no attachments is ignored`() = runTest(testDispatcher) {
-        // Act
         viewModel.sendMessage("   ")
         advanceUntilIdle()
-
-        // Assert - no interactions with repository beyond the init observer
         coVerify(exactly = 0) { repository.appendMessage(any()) }
         coVerify(exactly = 0) { repository.createConversation() }
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 10: deleteConversation delegates to repository
-    // ---------------------------------------------------------------------------
     @Test
     fun `deleteConversation calls repository deleteConversation`() = runTest(testDispatcher) {
-        // Arrange
         val conversationId = "conv-10"
         coEvery { repository.deleteConversation(any()) } just Runs
         every { repository.observeConversations() } returns flowOf(emptyList())
 
-        // Act
         viewModel.deleteConversation(conversationId)
         advanceUntilIdle()
-
-        // Assert
         coVerify { repository.deleteConversation(conversationId) }
     }
 
     @Test
     fun `deleteConversation current conversation resets to new chat`() = runTest(testDispatcher) {
-        // Arrange
         val conversationId = "conv-11"
         val messages = listOf(Message("m1", conversationId, Role.USER, "Hi", 1000L))
         coEvery { repository.observeMessages(conversationId) } returns flowOf(messages)
@@ -463,36 +355,28 @@ class ChatViewModelTest {
         advanceUntilIdle()
         assertEquals(conversationId, viewModel.uiState.value.currentConversationId)
 
-        // Act
         viewModel.deleteConversation(conversationId)
         advanceUntilIdle()
 
-        // Assert
         assertNull(viewModel.uiState.value.currentConversationId)
         assertTrue(viewModel.uiState.value.messages.isEmpty())
     }
 
-    // ---------------------------------------------------------------------------
-    // Test 11: MessageSent event emitted on successful stream completion
-    // ---------------------------------------------------------------------------
     @Test
     fun `successful stream emits MessageSent event`() = runTest(testDispatcher) {
-        // Arrange
         val conversationId = "conv-12"
         coEvery { repository.createConversation() } returns conversationId
         coEvery { repository.getMessages(conversationId) } returns emptyList()
         coEvery { repository.observeMessages(conversationId) } returns flowOf(emptyList())
         every { repository.observeConversations() } returns flowOf(emptyList())
-        every { remoteDataSource.streamChat(any(), any()) } returns flowOf("OK")
+        every { remoteDataSource.streamChat(any(), any()) } returns contentFlow("OK")
 
-        // Act & Assert
         viewModel.events.test {
             viewModel.sendMessage("Hello")
             advanceUntilIdle()
 
             val event = awaitItem()
             assertTrue(event is ChatEvent.MessageSent)
-
             cancelAndConsumeRemainingEvents()
         }
     }

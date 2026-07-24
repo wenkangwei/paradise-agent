@@ -10,22 +10,34 @@ import com.google.gson.annotations.SerializedName
  * {
  *   "choices": [
  *     {
- *       "delta": { "content": "Hello" },
+ *       "delta": {
+ *         "content": "Hello",
+ *         "reasoning_content": "Thinking..."
+ *       },
  *       "index": 0,
  *       "finish_reason": null
  *     }
  *   ]
  * }
  * ```
+ *
+ * `reasoning_content` is emitted by DeepSeek-R1, Qwen3 thinking mode, and
+ * several other models that expose chain-of-thought alongside the answer.
  */
 data class ChatStreamChunkDto(
     @SerializedName("choices") val choices: List<ChoiceDto> = emptyList()
 ) {
-    /**
-     * Extracts the content delta from the first choice, or null if absent.
-     */
+    /** First-choice content delta, or null if absent. */
     val contentDelta: String?
         get() = choices.firstOrNull()?.delta?.content
+
+    /** First-choice reasoning delta (e.g. DeepSeek-R1 `reasoning_content`). */
+    val reasoningDelta: String?
+        get() = choices.firstOrNull()?.delta?.reasoningContent
+
+    /** First-choice finish_reason; non-null on the terminal chunk. */
+    val finishReason: String?
+        get() = choices.firstOrNull()?.finishReason
 }
 
 data class ChoiceDto(
@@ -36,5 +48,6 @@ data class ChoiceDto(
 
 data class DeltaDto(
     @SerializedName("role") val role: String? = null,
-    @SerializedName("content") val content: String? = null
+    @SerializedName("content") val content: String? = null,
+    @SerializedName("reasoning_content") val reasoningContent: String? = null
 )

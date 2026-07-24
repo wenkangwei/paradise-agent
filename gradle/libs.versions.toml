@@ -1,7 +1,7 @@
 [versions]
 agp = "8.5.0"
-kotlin = "2.0.0"
-ksp = "2.0.0-1.0.21"
+kotlin = "2.0.21"
+ksp = "2.0.21-1.0.28"
 
 # Compose
 composeBom = "2024.06.00"
@@ -10,7 +10,7 @@ lifecycleViewModelCompose = "2.8.2"
 navigationCompose = "2.7.7"
 
 # Hilt
-hilt = "2.51.1"
+hilt = "2.56.2"
 hiltNavigationCompose = "1.2.0"
 
 # Room
@@ -29,6 +29,9 @@ coil = "2.6.0"
 # Core KTX
 coreKtx = "1.13.1"
 
+# Security (encrypted API key storage)
+securityCrypto = "1.1.0-alpha06"
+
 # Testing
 junit = "4.13.2"
 turbine = "1.1.0"
@@ -38,6 +41,9 @@ robolectric = "4.12.2"
 [libraries]
 # Core
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+
+# Security
+androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
 
 # Compose
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }

@@ -11,6 +11,6 @@ interface AiApiService {
 
     @Streaming
     @Headers("Accept: text/event-stream")
-    @POST("v1/chat/completions")
+    @POST("chat/completions")
     suspend fun streamChat(@Body request: ChatRequestDto): ResponseBody
 }

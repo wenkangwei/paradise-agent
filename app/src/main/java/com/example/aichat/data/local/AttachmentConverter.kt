@@ -16,6 +16,8 @@ class AttachmentConverter {
     fun toAttachmentList(value: String): List<Attachment> {
         if (value.isBlank()) return emptyList()
         val type = object : TypeToken<List<Attachment>>() {}.type
-        return runCatching { gson.fromJson(value, type) }.getOrDefault(emptyList())
+        return runCatching {
+            gson.fromJson<List<Attachment>>(value, type) ?: emptyList()
+        }.getOrDefault(emptyList())
     }
 }

@@ -3,12 +3,25 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#00696D"
-        android:pathData="M54,30 L78,30 A6,6 0 0 1 84,36 L84,60 A6,6 0 0 1 78,66 L60,66 L48,78 L48,66 L30,66 A6,6 0 0 1 24,60 L24,36 A6,6 0 0 1 30,30 Z" />
+
+    <!-- Outer rounded chat bubble (white) -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M40,42 L68,42 M40,50 L60,50 M40,58 L52,58"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="3" />
+        android:pathData="M40,30 L72,30 A10,10 0 0 1 82,40 L82,58 A10,10 0 0 1 72,68 L56,68 L44,80 A2,2 0 0 1 41,79 L41,68 L36,68 A10,10 0 0 1 26,58 L26,40 A10,10 0 0 1 36,30 Z" />
+
+    <!-- Three dots inside the bubble (teal, representing conversation) -->
+    <path
+        android:fillColor="#00897B"
+        android:pathData="M40,49 m-3,0 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0" />
+    <path
+        android:fillColor="#00897B"
+        android:pathData="M54,49 m-3,0 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0" />
+    <path
+        android:fillColor="#00897B"
+        android:pathData="M68,49 m-3,0 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0" />
+
+    <!-- AI sparkle on the top right of the bubble -->
+    <path
+        android:fillColor="#FFD54F"
+        android:pathData="M74,24 L76,30 L82,32 L76,34 L74,40 L72,34 L66,32 L72,30 Z" />
 </vector>

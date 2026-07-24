@@ -1,15 +1,14 @@
 package com.example.aichat.data.remote
 
-import com.example.aichat.data.remote.dto.ChatRequestDto
-import com.example.aichat.data.remote.dto.ContentPart
-import com.example.aichat.data.remote.dto.ImageUrlData
-import com.example.aichat.data.remote.dto.MessageDto
+import com.example.aichat.data.local.entity.ApiProfileEntity
+import com.example.aichat.data.provider.LlmProvider
+import com.example.aichat.data.provider.LlmProviderFactory
+import com.example.aichat.data.provider.StreamEvent
+import com.example.aichat.data.repository.ApiProfileRepository
+import com.example.aichat.data.security.ApiKeyEncryptor
 import com.example.aichat.domain.model.Message
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
-import retrofit2.HttpException
-import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -36,33 +35,35 @@ data class Attachment(
 /**
  * Remote data source for AI chat streaming.
  *
- * Converts domain [Message] list to DTOs, calls the streaming endpoint,
- * and returns a [Flow] of content token strings.
+ * Bridges the domain [Message] type to [LlmProvider.stream] — it no longer owns
+ * a Retrofit singleton or reads baseUrl/apiKey from [ConfigManager]. Instead, the
+ * active [ApiProfileEntity] is resolved at call time via [ApiProfileRepository],
+ * and the concrete OkHttp/Retrofit stack is supplied (and cached) by
+ * [LlmProviderFactory] so that switching profiles takes effect immediately
+ * without restarting the app (this was the original Singleton Retrofit bug).
+ *
+ * Emits [StreamEvent]s — callers discriminate between content, reasoning, and
+ * finish events instead of consuming raw token strings.
  */
 @Singleton
 class ChatRemoteDataSource @Inject constructor(
-    private val apiService: AiApiService,
-    private val streamClient: AiStreamClient,
-    private val configManager: ConfigManager
+    private val providerFactory: LlmProviderFactory,
+    private val apiProfileRepo: ApiProfileRepository,
+    private val apiKeyEncryptor: ApiKeyEncryptor
 ) {
 
     /**
-     * Streams a chat completion, emitting content token deltas.
+     * Streams a chat completion, emitting structured [StreamEvent]s.
      *
-     * @param messages conversation messages (text-only)
-     * @param model optional model override; falls back to [ConfigManager] default
+     * @param messages conversation history (text-only)
+     * @param model optional model override; falls back to the active profile's model
      */
     fun streamChat(
         messages: List<Message>,
         model: String? = null
-    ): Flow<String> = flow {
-        val config = configManager.currentConfig()
-        val request = ChatRequestDto(
-            model = model ?: config.model,
-            messages = messages.map { it.toDto() },
-            stream = true
-        )
-        executeStream(request)
+    ): Flow<StreamEvent> = flow {
+        val provider = resolveProvider()
+        emitAll(provider.stream(messages, attachments = null, model = model))
     }
 
     /**
@@ -74,65 +75,45 @@ class ChatRemoteDataSource @Inject constructor(
     fun streamChatMultimodal(
         messages: List<Pair<Message, List<Attachment>>>,
         model: String? = null
-    ): Flow<String> = flow {
-        val config = configManager.currentConfig()
-        val request = ChatRequestDto(
-            model = model ?: config.model,
-            messages = messages.map { (msg, attachments) -> msg.toDto(attachments) },
-            stream = true
+    ): Flow<StreamEvent> = flow {
+        val provider = resolveProvider()
+        val domainMessages = messages.map { it.first }
+        val remoteAttachments = messages.map { it.second }
+        emitAll(provider.stream(domainMessages, remoteAttachments, model))
+    }
+
+    /**
+     * Resolves the active profile and constructs (or fetches a cached)
+     * [LlmProvider] for it. Throws [IllegalStateException] if no profile is
+     * configured — callers should have been seeded by [ApiProfileBootstrap].
+     */
+    private suspend fun resolveProvider(): LlmProvider {
+        val profile = apiProfileRepo.getActive()
+            ?: error("No active ApiProfile; ApiProfileBootstrap.ensureSeeded() was not called.")
+        // Decrypt the plaintext key once per stream and bake it into the
+        // ApiProfileEntity snapshot we hand to the factory. Subsequent calls
+        // hit the LlmProviderFactory LRU cache, keyed by id — so a key rotation
+        // invalidates only on next miss, not on every request.
+        val plainKey = apiKeyEncryptor.decrypt(profile.id).orEmpty()
+        val entity = ApiProfileEntity(
+            id = profile.id,
+            title = profile.title,
+            supplierId = profile.supplierId,
+            baseUrl = profile.baseUrl,
+            apiKeyEncrypted = plainKey,
+            modelName = profile.modelName,
+            isDefault = true,
+            customFieldsJson = "{}",
+            createdAt = profile.createdAt,
+            updatedAt = profile.updatedAt
         )
-        executeStream(request)
+        return providerFactory.get(entity)
     }
 
-    /**
-     * Builds the streaming request, handles errors, and emits tokens.
-     * Called within a [flow] builder scope.
-     */
-    private suspend fun FlowCollector<String>.executeStream(
-        request: ChatRequestDto
+    /** Delegates emission to the upstream flow without re-collecting manually. */
+    private suspend fun <T> kotlinx.coroutines.flow.FlowCollector<T>.emitAll(
+        source: Flow<T>
     ) {
-        val responseBody = try {
-            apiService.streamChat(request)
-        } catch (e: HttpException) {
-            throw ApiException("API error: HTTP ${e.code()} - ${e.message()}", e)
-        } catch (e: IOException) {
-            throw NetworkException("Network error: ${e.message}", e)
-        }
-
-        streamClient.toTokenFlow(responseBody).collect { token ->
-            emit(token)
-        }
-    }
-
-    /**
-     * Converts a domain [Message] to a text-only [MessageDto].
-     */
-    private fun Message.toDto(): MessageDto = MessageDto(
-        role = role.name.lowercase(),
-        content = listOf(ContentPart.Text(text = content))
-    )
-
-    /**
-     * Converts a domain [Message] with [attachments] to a multimodal [MessageDto].
-     * Text part first, followed by image parts.
-     */
-    private fun Message.toDto(attachments: List<Attachment>): MessageDto {
-        val parts = mutableListOf<ContentPart>()
-
-        if (content.isNotBlank()) {
-            parts.add(ContentPart.Text(text = content))
-        }
-
-        attachments.forEach { att ->
-            parts.add(
-                ContentPart.ImageUrl(imageUrl = ImageUrlData(url = att.url))
-            )
-        }
-
-        if (parts.isEmpty()) {
-            parts.add(ContentPart.Text(text = ""))
-        }
-
-        return MessageDto(role = role.name.lowercase(), content = parts)
+        source.collect { emit(it) }
     }
 }

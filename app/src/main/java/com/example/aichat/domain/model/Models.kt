@@ -20,7 +20,31 @@ data class Message(
     val role: Role,
     val content: String,
     val timestamp: Long,
-    val attachments: List<Attachment> = emptyList()
+    val attachments: List<Attachment> = emptyList(),
+    val status: MessageStatus = MessageStatus.COMPLETE,
+    val reasoningContent: String? = null,
+    val metadata: MessageMetadata? = null
 )
 
 enum class Role { USER, ASSISTANT, SYSTEM }
+
+/**
+ * Lifecycle status of a message.
+ * - COMPLETE: AI finished normally
+ * - STREAMING: in-progress (only used in UI state, not persisted)
+ * - INTERRUPTED: user pressed stop with partial content saved
+ * - FAILED: API/network error
+ */
+enum class MessageStatus {
+    COMPLETE,
+    STREAMING,
+    INTERRUPTED,
+    FAILED
+}
+
+data class MessageMetadata(
+    val durationMs: Long? = null,
+    val tokenCount: Int? = null,
+    val interruptedReason: String? = null,
+    val errorCategory: String? = null
+)

@@ -1,12 +1,14 @@
 package com.example.aichat.data.remote
 
 import app.cash.turbine.test
+import com.example.aichat.data.provider.StreamEvent
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -16,6 +18,12 @@ class AiStreamClientTest {
 
     private fun sseBody(text: String): ResponseBody =
         text.toResponseBody("text/event-stream".toMediaType())
+
+    private fun List<StreamEvent>.contentDeltas(): List<String> =
+        filterIsInstance<StreamEvent.ContentDelta>().map { it.text }
+
+    private fun List<StreamEvent>.reasoningDeltas(): List<String> =
+        filterIsInstance<StreamEvent.ReasoningDelta>().map { it.text }
 
     @Test
     fun `emits content deltas from valid SSE data lines in order`() = runTest {
@@ -29,9 +37,23 @@ class AiStreamClientTest {
             append("data: [DONE]\n")
         })
 
-        val tokens = client.toTokenFlow(body).toList()
+        val events = client.toEventFlow(body).toList()
 
-        assertEquals(listOf("Hello", " world", "!"), tokens)
+        assertEquals(listOf("Hello", " world", "!"), events.contentDeltas())
+    }
+
+    @Test
+    fun `emits reasoning deltas alongside content`() = runTest {
+        val body = sseBody(buildString {
+            append("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n")
+            append("data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n")
+            append("data: [DONE]\n")
+        })
+
+        val events = client.toEventFlow(body).toList()
+
+        assertEquals(listOf("thinking..."), events.reasoningDeltas())
+        assertEquals(listOf("answer"), events.contentDeltas())
     }
 
     @Test
@@ -46,9 +68,9 @@ class AiStreamClientTest {
             append("data: [DONE]\n")
         })
 
-        val tokens = client.toTokenFlow(body).toList()
+        val events = client.toEventFlow(body).toList()
 
-        assertEquals(listOf("Hi"), tokens)
+        assertEquals(listOf("Hi"), events.contentDeltas())
     }
 
     @Test
@@ -60,9 +82,35 @@ class AiStreamClientTest {
             append("data: {\"choices\":[{\"delta\":{\"content\":\"C\"}}]}\n")
         })
 
-        val tokens = client.toTokenFlow(body).toList()
+        val events = client.toEventFlow(body).toList()
 
-        assertEquals(listOf("A", "B"), tokens)
+        assertEquals(listOf("A", "B"), events.contentDeltas())
+    }
+
+    @Test
+    fun `emits Finish event with reason when present`() = runTest {
+        val body = sseBody(buildString {
+            append("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n")
+        })
+
+        val events = client.toEventFlow(body).toList()
+
+        assertTrue("Expected Finish event", events.any { it is StreamEvent.Finish })
+        val finish = events.filterIsInstance<StreamEvent.Finish>().single()
+        assertEquals("stop", finish.reason)
+    }
+
+    @Test
+    fun `emits Finish with null reason at DONE when no prior finish_reason`() = runTest {
+        val body = sseBody(buildString {
+            append("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n")
+            append("data: [DONE]\n")
+        })
+
+        val events = client.toEventFlow(body).toList()
+
+        val finish = events.filterIsInstance<StreamEvent.Finish>().single()
+        assertEquals(null, finish.reason)
     }
 
     @Test
@@ -77,9 +125,9 @@ class AiStreamClientTest {
             append("data: [DONE]\n")
         })
 
-        val tokens = client.toTokenFlow(body).toList()
+        val events = client.toEventFlow(body).toList()
 
-        assertEquals(listOf("only this"), tokens)
+        assertEquals(listOf("only this"), events.contentDeltas())
     }
 
     @Test
@@ -90,16 +138,16 @@ class AiStreamClientTest {
             append("data: [DONE]\n")
         })
 
-        val tokens = client.toTokenFlow(body).toList()
+        val events = client.toEventFlow(body).toList()
 
-        assertEquals(listOf("nospace", "space"), tokens)
+        assertEquals(listOf("nospace", "space"), events.contentDeltas())
     }
 
     @Test
     fun `completes on empty stream`() = runTest {
         val body = sseBody("")
 
-        client.toTokenFlow(body).test {
+        client.toEventFlow(body).test {
             awaitComplete()
         }
     }
@@ -109,7 +157,6 @@ class AiStreamClientTest {
         val closed = AtomicBoolean(false)
         val body = sseBody("data: {\"choices\":[{\"delta\":{\"content\":\"X\"}}]}\ndata: [DONE]\n")
 
-        // Wrap the close call to track invocation
         val originalSource = body.source()
         val trackingBody = object : ResponseBody() {
             override fun contentType() = body.contentType()
@@ -121,8 +168,8 @@ class AiStreamClientTest {
             }
         }
 
-        client.toTokenFlow(trackingBody).test {
-            assertEquals("X", awaitItem())
+        client.toEventFlow(trackingBody).test {
+            assertEquals("X", (awaitItem() as StreamEvent.ContentDelta).text)
             awaitComplete()
         }
 
@@ -137,9 +184,9 @@ class AiStreamClientTest {
             append("data: [DONE]\n")
         })
 
-        val tokens = client.toTokenFlow(body).toList()
+        val events = client.toEventFlow(body).toList()
 
-        assertEquals(listOf("valid"), tokens)
+        assertEquals(listOf("valid"), events.contentDeltas())
     }
 
     @Test
@@ -157,8 +204,8 @@ class AiStreamClientTest {
             append("data: [DONE]\n")
         })
 
-        val tokens = client.toTokenFlow(body).toList()
+        val events = client.toEventFlow(body).toList()
 
-        assertEquals(listOf("A", "B", "C"), tokens)
+        assertEquals(listOf("A", "B", "C"), events.contentDeltas())
     }
 }

@@ -1,5 +1,7 @@
 package com.example.aichat.di
 
+import com.example.aichat.data.repository.ApiProfileRepository
+import com.example.aichat.data.repository.ApiProfileRepositoryImpl
 import com.example.aichat.data.repository.ChatRepositoryImpl
 import com.example.aichat.domain.repository.ChatRepository
 import dagger.Binds
@@ -15,4 +17,8 @@ abstract class RepositoryModule {
     @Binds
     @Singleton
     abstract fun bindChatRepository(impl: ChatRepositoryImpl): ChatRepository
+
+    @Binds
+    @Singleton
+    abstract fun bindApiProfileRepository(impl: ApiProfileRepositoryImpl): ApiProfileRepository
 }
