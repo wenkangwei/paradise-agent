@@ -1,6 +1,7 @@
 package com.example.aichat.ui.chat
 
 import android.content.Intent
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -27,16 +28,19 @@ import androidx.compose.material.icons.filled.ThumbDown
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -163,13 +167,12 @@ fun MessageBubble(
                             }
                         }
 
-                        if (message.isStreaming) {
-                            if (message.content.isBlank()) {
-                                StreamingCursor(color = chatColors.streamingCursor)
-                            } else {
-                                Spacer(Modifier.height(2.dp))
-                                StreamingCursor(color = chatColors.onAiBubbleColor)
-                            }
+                        if (message.isStreaming && message.content.isBlank()) {
+                            // No content yet — animated thinking indicator
+                            StreamingPlaceholder(color = chatColors.onAiBubbleColor)
+                        } else if (message.isStreaming && message.content.isNotBlank()) {
+                            Spacer(Modifier.height(2.dp))
+                            StreamingCursor(color = chatColors.onAiBubbleColor)
                         }
 
                         // AI-only feedback row (like / dislike) — Kimi style.
@@ -268,6 +271,45 @@ private fun ReactionIcon(
             tint = tint,
             modifier = Modifier.size(16.dp)
         )
+    }
+}
+
+/**
+ * Animated thinking indicator shown in the AI bubble before the first token
+ * arrives — replaces the static blinking cursor with a small rotating
+ * progress ring + cycling status text ("拼命思考中..." → ...).
+ */
+@Composable
+private fun StreamingPlaceholder(color: Color) {
+    val phrases = listOf("拼命思考中...", "正在组织语言...", "马上就好...", "再等一下...")
+    var index by remember { mutableStateOf(0) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(2_200L)
+            index = (index + 1) % phrases.size
+        }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(18.dp),
+            strokeWidth = 2.dp,
+            color = color.copy(alpha = 0.6f)
+        )
+        AnimatedContent(
+            targetState = phrases[index],
+            label = "thinking-status"
+        ) { phrase ->
+            Text(
+                text = phrase,
+                color = color.copy(alpha = 0.7f),
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
     }
 }
 

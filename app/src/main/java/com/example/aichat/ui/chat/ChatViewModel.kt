@@ -21,6 +21,7 @@ import com.example.aichat.ui.chat.model.toChatMessages
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -53,6 +54,16 @@ class ChatViewModel @Inject constructor(
 
     private var streamingJob: Job? = null
     private var messagesObserverJob: Job? = null
+
+    /** Catches unhandled exceptions in the streaming coroutine so a single
+     *  malformed SSE chunk or state race doesn't kill the app. */
+    private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        _uiState.update { it.copy(isLoading = false, isStreaming = false) }
+        removeStreamingPlaceholder()
+        _events.tryEmit(ChatEvent.ShowError(
+            "发生未知错误: ${throwable.message?.take(80) ?: "请重试"}", null
+        ))
+    }
 
     init {
         observeConversations()
@@ -118,7 +129,7 @@ class ChatViewModel @Inject constructor(
 
         _uiState.update { it.copy(pendingAttachments = emptyList()) }
 
-        streamingJob = viewModelScope.launch {
+        streamingJob = viewModelScope.launch(exceptionHandler) {
             _uiState.update { it.copy(isLoading = true, error = null) }
 
             try {
