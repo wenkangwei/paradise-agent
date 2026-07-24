@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -155,7 +156,43 @@ fun ChatScreen(
                     }
                 )
             },
-            bottomBar = {
+            // Intentionally NO bottomBar — input floats over chat with transparent
+            // background, no divider line drawn by Scaffold.
+            snackbarHost = { SnackbarHost(snackbarHostState) }
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+            ) {
+                if (uiState.messages.isEmpty() && uiState.pendingAttachments.isEmpty()) {
+                    EmptyState(
+                        onSuggestionClick = { viewModel.sendMessage(it) },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        // Reserve bottom space so messages aren't hidden behind the floating pill
+                        contentPadding = PaddingValues(
+                            start = 12.dp,
+                            end = 12.dp,
+                            top = 8.dp,
+                            bottom = 96.dp
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(
+                            items = uiState.messages,
+                            key = { it.id }
+                        ) { message ->
+                            MessageBubble(message = message)
+                        }
+                    }
+                }
+
+                // Floating input pill — overlaid at the bottom of the chat
                 ChatInputBar(
                     isLoading = uiState.isLoading,
                     onSend = { text, attachments ->
@@ -168,35 +205,11 @@ fun ChatScreen(
                     },
                     onRemoveAttachment = { id ->
                         viewModel.removePendingAttachment(id)
-                    }
-                )
-            },
-            snackbarHost = { SnackbarHost(snackbarHostState) }
-        ) { innerPadding ->
-            if (uiState.messages.isEmpty() && uiState.pendingAttachments.isEmpty()) {
-                EmptyState(
-                    onSuggestionClick = { viewModel.sendMessage(it) },
-                    modifier = Modifier.padding(innerPadding)
-                )
-            } else {
-                LazyColumn(
-                    state = listState,
+                    },
                     modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding),
-                    contentPadding = PaddingValues(
-                        horizontal = 12.dp,
-                        vertical = 8.dp
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    items(
-                        items = uiState.messages,
-                        key = { it.id }
-                    ) { message ->
-                        MessageBubble(message = message)
-                    }
-                }
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                )
             }
         }
     }

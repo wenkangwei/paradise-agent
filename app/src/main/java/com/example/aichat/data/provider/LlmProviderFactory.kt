@@ -119,14 +119,25 @@ private class OpenAiCompatibleProvider(
     private fun buildStack(): AiApiService {
         val baseUrl = profile.baseUrl.let { if (it.endsWith("/")) it else "$it/" }
 
+        // Logging: NONE in streaming path. Even BASIC level reads every response
+        // chunk to print its metadata, which forces buffering and delays SSE
+        // delivery to the parser → looks like GLM is "slow" when it's actually
+        // OkHttp holding back chunks for the logger. Set Level.NONE to be safe.
         val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BASIC  // avoid leaking prompts in logs
+            level = HttpLoggingInterceptor.Level.NONE
         }
         val auth = Interceptor { chain ->
             val builder = chain.request().newBuilder()
                 .addHeader("Authorization", "Bearer ${profile.apiKeyEncrypted}")
                 .addHeader("Content-Type", "application/json")
                 .addHeader("Accept", "text/event-stream")
+                // Disable gzip on the SSE stream. If the server returns gzip'd
+                // chunks OkHttp waits for a full compressed block before
+                // decompressing — visible as "bursty" token delivery.
+                .addHeader("Accept-Encoding", "identity")
+                // Hint to intermediate proxies / CDN to disable buffering too.
+                .addHeader("Cache-Control", "no-cache")
+                .addHeader("Connection", "keep-alive")
             supplier.extraHeaders.forEach { (k, v) -> builder.addHeader(k, v) }
             chain.proceed(builder.build())
         }
@@ -134,10 +145,12 @@ private class OpenAiCompatibleProvider(
         val client = OkHttpClient.Builder()
             .addInterceptor(auth)
             .addInterceptor(logging)
-            .connectTimeout(60, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
-            .callTimeout(180, TimeUnit.SECONDS)
+            .connectionPool(sharedConnectionPool)
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.SECONDS)   // no read timeout for streaming
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.SECONDS)   // no overall cap; stream stays open
+            .retryOnConnectionFailure(true)
             .build()
 
         val retrofit = Retrofit.Builder()
@@ -147,6 +160,17 @@ private class OpenAiCompatibleProvider(
             .build()
 
         return retrofit.create(AiApiService::class.java)
+    }
+
+    companion object {
+        // One shared pool across all profiles so DNS/TLS warmups persist when
+        // the user switches profiles. Without this, switching profile = new
+        // OkHttp = new pool = cold TLS handshake on the next request.
+        private val sharedConnectionPool = okhttp3.ConnectionPool(
+            maxIdleConnections = 5,
+            keepAliveDuration = 5,
+            TimeUnit.MINUTES
+        )
     }
 
     private fun Message.toDto(): MessageDto = MessageDto(

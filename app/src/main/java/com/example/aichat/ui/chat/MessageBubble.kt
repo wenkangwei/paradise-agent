@@ -94,6 +94,23 @@ fun MessageBubble(
                     Column(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                     ) {
+                        // Reasoning / thinking trace — only for AI + when present
+                        if (!isUser && !message.reasoningContent.isNullOrBlank()) {
+                            ReasoningSection(
+                                reasoning = message.reasoningContent,
+                                isStreaming = message.isStreaming && message.content.isBlank()
+                            )
+                            if (message.content.isNotBlank()) Spacer(Modifier.height(8.dp))
+                        }
+
+                        // Search results (RAG) — only for AI + when metadata carries them
+                        if (!isUser) {
+                            message.metadata?.searchResults?.takeIf { it.isNotEmpty() }?.let { results ->
+                                SearchResultsSection(results = results)
+                                if (message.content.isNotBlank()) Spacer(Modifier.height(8.dp))
+                            }
+                        }
+
                         if (message.content.isNotBlank()) {
                             if (isUser) {
                                 Text(

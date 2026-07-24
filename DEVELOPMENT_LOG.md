@@ -4,6 +4,108 @@
 
 ---
 
+## v3 — 2026-07-24（语音/Markdown/悬浮栏/统一网关）
+
+### 背景
+v2 装机后用户二次实测，提了 5 个问题。本版同时落地一个**重要架构决策**：
+为后续自建统一模型网关（ASR/TTS/LLM/文生图/图生图）预留接口。
+
+### Git 分支策略
+按用户要求，从 v3 开始每版独立分支：
+- `main` → v1 baseline (0b4bcff)
+- `v2-baseline` → v2 改动提交点 (18628ff)
+- `v3-voice-markdown-floating` → 本次 v3 所有改动
+
+### 修复清单
+
+| # | 问题 | 根因 | 修复 | 文件 |
+|---|---|---|---|---|
+| 1 | 语音按钮一直按没反应 | 原方案用 `detectTapGestures(onPress=…)` + `tryAwaitRelease()`，在多次 recomposition 下不稳定（手势识别和 Compose 重组竞争） | 改用 Compose 官方推荐的 **InteractionSource + collectIsPressedAsState()** 模式：`MutableInteractionSource` → `LaunchedEffect(isPressed)` 触发 `onPress()/onRelease()` | `ChatInputBar.kt` |
+| 2 | AI 回复还是裸 markdown | 之前的手写 parser 只处理 code block 和加粗 | **手写 AnnotatedString 渲染器**（约 350 行），支持 headers/bold/italic/strike/inline-code/` ``` ` 代码块/列表/blockquote/hr/link。代码块带 copy 按钮。先尝试用 `com.mikepenz:multiplatform-markdown-renderer-m3`，但该库**不在阿里云镜像**，国内拉不到，回退手写。思考内容用 `ReasoningSection.kt` 折叠卡片；RAG 结果用 `SearchResultsSection.kt` 折叠列表。 | `MarkdownText.kt`, `ReasoningSection.kt`, `MessageBubble.kt` |
+| 3 | GLM 返回慢 | HttpLoggingInterceptor 读每一个 chunk + gzip 让 OkHttp 缓冲 SSE + 跨 profile 切换不共享 ConnectionPool | LoggingInterceptor 改 `NONE`；请求头加 `Accept-Encoding: identity` 禁用 gzip；`LlmProviderFactory` 加静态共享 `ConnectionPool(maxIdle=5, keepAlive=5min)` | `LlmProviderFactory.kt` |
+| 4 | 输入栏有底栏分隔线、⊕ 和发送按钮在 TextField 下方 | Scaffold 的 `bottomBar` 产生的视觉割裂；按钮放在 Column 里 TextField 之下 | 删 `bottomBar`；整个输入栏用 `Box(Alignment.BottomCenter)` 浮在 content 上；TextField 用 `leadingIcon=⊕` / `trailingIcon=Stop/Mic/Send` 三态按钮，全部塞进胶囊内部。LazyColumn 加 `bottom=96.dp` 防止消息被遮挡 | `ChatScreen.kt`, `ChatInputBar.kt` |
+| 5 | (架构)统一网关协议 | 用户后端要做统一网关（LLM+ASR+TTS+T2I+I2I），需要 App 预留接口 + 统一消息格式 | 新建 `docs/API_GATEWAY_SPEC.md` 规范文档（14 节）+ `data/remote/gateway/` 包（`UnifiedMessage.kt` parts-based 消息、`GatewayDtos.kt` 8 个端点 DTO、`GatewayClient.kt` Retrofit 接口 stub）；`BuiltinSuppliers` 新增 `MyGatewaySupplier` 入口 | 见下 |
+
+### 统一网关设计要点（v3 #5）
+
+**为什么**：OpenAI 兼容协议只覆盖 chat，但用户的网关要同时支持 ASR/TTS/文生图/图生图。各厂商字段名各不相同（`image_url` vs `source`、`delta.content` vs `reasoning_content`），客户端直连各家会变成长尾地狱。
+
+**怎么做的**：
+1. **消息 parts 化**：所有模态共用 `content: [{type:"text"/"image"/"audio"/"file"/"tool_result"}]`
+2. **SSE 事件类型化**：不再靠 `delta.xxx` 判别，而是用 `event: text_delta / reasoning_delta / audio_delta / image / search_results / tool_call / tool_result / usage / finish / error`
+3. **8 个端点**：`/v1/chat/completions`、`/v1/asr`、`/v1/tts`、`/v1/images/generations`、`/v1/images/edits`、`/v1/agent/run`、`/v1/files`、`/v1/models`
+4. **客户端预留**：`GatewayClient` Retrofit 接口已经写好但**未注入 Hilt**，等后端起来改 `NetworkModule` + `ChatRemoteDataSource` 切流即可
+
+### 踩过的坑（v3 新增）
+
+1. **mikepenz 库不在阿里云镜像**
+   - 报错：`Could not find com.mikepenz:multiplatform-markdown-renderer-m3:0.5.4`
+   - 原因：阿里云只镜像 maven central/google，mikepenz 的发布在 central 但延迟或镜像策略导致没同步
+   - 解法：删依赖，手写 AnnotatedString-based markdown renderer
+
+2. **InteractionSource 比 detectTapGestures 稳定**
+   - 原因：`detectTapGestures` 在 `pointerInput` 里跑，受 Compose 重组影响；`collectIsPressedAsState()` 通过 state 订阅更稳定
+   - 注意：要给 Box 同时设 `clickable(interactionSource=…, indication=rememberRipple())`，否则按下没水波纹反馈
+
+3. **SSE 禁用 gzip 的正确姿势**
+   - 不是删 `Accept-Encoding` 头（OkHttp 会自动加），而是显式设 `Accept-Encoding: identity`
+   - 否则 OkHttp 透明解压，但 chunked transfer-encoding + gzip 在很多 SSE 网关会**缓冲到流结束才发**，体感就是"等半天然后一次性出全部字"
+
+4. **共享 ConnectionPool 节省握手**
+   - 多 profile 切换时如果每次都新建 OkHttp client，TCP+TLS 握手重复
+   - 静态 `ConnectionPool(maxIdle=5, keepAlive=5min)` 让 5 个 idle 连接跨 profile 复用
+   - 但要注意：**不同 baseUrl 不复用**，连接池按 host 区分，所以只在同 domain 不同 path 时受益
+
+### 构建命令备忘
+
+```bash
+# 编译 v3（在 WSL2 内）
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+export ANDROID_HOME=$HOME/Android/Sdk
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+cd /home/wwk/workspace/ai_project/android-app
+git checkout v3-voice-markdown-floating
+./gradlew assembleDebug --no-daemon
+
+# 产物
+cp app/build/outputs/apk/debug/app-debug.apk /mnt/c/Users/wenka/Desktop/aichat-v3-debug.apk
+```
+
+### v3 已知未做
+
+- **ASR 走系统 SpeechRecognizer**（免费但识别质量一般）→ 等网关 `/v1/asr` 起来换 Whisper
+- **TTS 未做** → 等网关 `/v1/tts`
+- **文生图未做** → 等网关 `/v1/images/generations`
+- **Agent 切换器** → 等网关 `/v1/agent/run`
+- **base64 内联图片入库**：超大图片会让 Room 行撑爆，未来要走 `/v1/files` 上传后存 URL
+
+### 文件清单（v3 新增/修改）
+
+**新增**：
+- `docs/API_GATEWAY_SPEC.md` — 统一网关规范（14 节）
+- `app/src/main/java/com/example/aichat/data/remote/gateway/UnifiedMessage.kt`
+- `app/src/main/java/com/example/aichat/data/remote/gateway/GatewayDtos.kt`
+- `app/src/main/java/com/example/aichat/data/remote/gateway/GatewayClient.kt`
+- `app/src/main/java/com/example/aichat/ui/chat/ReasoningSection.kt`
+
+**重写**：
+- `app/src/main/java/com/example/aichat/ui/chat/MarkdownText.kt`（删依赖改手写）
+- `app/src/main/java/com/example/aichat/ui/chat/ChatInputBar.kt`（悬浮胶囊 + 内嵌按钮）
+- `app/src/main/java/com/example/aichat/ui/chat/ChatScreen.kt`（移除 bottomBar）
+
+**修改**：
+- `app/src/main/java/com/example/aichat/data/provider/LlmProviderFactory.kt`（SSE 优化 + 共享池）
+- `app/src/main/java/com/example/aichat/data/provider/BuiltinSuppliers.kt`（新增 MyGatewaySupplier）
+- `app/src/main/java/com/example/aichat/domain/model/Models.kt`（MessageMetadata 加 searchResults）
+- `app/src/main/java/com/example/aichat/ui/chat/model/ChatMessage.kt`（加 reasoningContent / metadata）
+- `app/src/main/java/com/example/aichat/ui/chat/model/ChatMessageMapper.kt`（传播新字段）
+- `app/src/main/java/com/example/aichat/ui/chat/MessageBubble.kt`（插入 ReasoningSection / SearchResultsSection）
+- `gradle/libs.versions.toml` + `app/build.gradle.kts`（移除 markdown 库）
+
+**产物**：`aichat-v3-debug.apk` (18 MB)
+
+---
+
 ## v2 — 2026-07-24（用户首测后大修）
 
 ### 背景

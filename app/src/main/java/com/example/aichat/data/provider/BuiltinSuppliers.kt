@@ -260,20 +260,55 @@ object CustomSupplier : Supplier {
 }
 
 /**
+ * 用户自建的统一模型网关（见 docs/API_GATEWAY_SPEC.md）。
+ *
+ * 现状（v3）：URL/Key 留空让用户填，category 走 OPENAI_COMPATIBLE 是因为
+ * 网关的 `/v1/chat/completions` 协议就是 OpenAI 兼容的，可以直接复用
+ * 现有 [com.example.aichat.data.remote.AiApiService]。
+ *
+ * 网关协议 v1.2+（ASR/TTS/T2I/I2I）落地后，会通过独立的
+ * [com.example.aichat.data.remote.gateway.GatewayClient] Retrofit 接口接入，
+ * 不再受限于 Supplier 的 OPENAI_COMPATIBLE 形态。
+ */
+object MyGatewaySupplier : Supplier {
+    override val id = "my_gateway"
+    override val displayName = "我的网关（自建统一网关）"
+    override val category = SupplierCategory.OPENAI_COMPATIBLE
+    override val defaultBaseUrl = "https://gateway.example.com/v1/"
+    override val suggestedModels = listOf(
+        // 占位：网关起来后改成真实 model id
+        "gateway-chat",
+        "gateway-reasoning",
+        "gateway-vision"
+    )
+    override val apiKeyRequired = true
+    override val brandColor = 0xFF8B5CF6
+    override val capabilities = setOf(
+        Capability.STREAMING,
+        Capability.MULTIMODAL,
+        Capability.TOOL_CALLING,
+        Capability.REASONING,
+        Capability.RAG
+    )
+}
+
+/**
  * Registry of all suppliers known to the app. Backed by Hilt so feature code
  * just injects [SupplierRegistry] and looks up by id.
  *
  * Order matters for the UI list — group by region/relevance:
  * 1. Default (own server)
- * 2. Chinese mainstream providers (智谱/通义/Kimi/豆包/千帆/星火/零一/混元/SiliconFlow)
- * 3. DeepSeek (separate because of popularity)
- * 4. International (OpenAI/Anthropic/Gemini)
- * 5. Local (Ollama)
- * 6. Custom (must be last for fallback)
+ * 2. My Gateway (user's unified gateway — see docs/API_GATEWAY_SPEC.md)
+ * 3. Chinese mainstream providers (智谱/通义/Kimi/豆包/千帆/星火/零一/混元/SiliconFlow)
+ * 4. DeepSeek (separate because of popularity)
+ * 5. International (OpenAI/Anthropic/Gemini)
+ * 6. Local (Ollama)
+ * 7. Custom (must be last for fallback)
  */
 object BuiltinSuppliers {
     val all: List<Supplier> = listOf(
         DefaultServerSupplier,
+        MyGatewaySupplier,
         ZhipuGlmSupplier,
         QwenSupplier,
         KimiSupplier,

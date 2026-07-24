@@ -20,7 +20,9 @@ fun Message.toChatMessage(): ChatMessage {
         },
         content = content,
         isStreaming = false,
-        attachments = attachments.map { it.toUiAttachment() }
+        attachments = attachments.map { it.toUiAttachment() },
+        reasoningContent = reasoningContent,
+        metadata = metadata
     )
 }
 

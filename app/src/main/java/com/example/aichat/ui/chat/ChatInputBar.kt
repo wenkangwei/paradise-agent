@@ -11,12 +11,11 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,14 +37,15 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.StopCircle
+import androidx.compose.material.ripple.rememberRipple
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,7 +56,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
@@ -67,19 +66,27 @@ import com.example.aichat.data.attachment.AttachmentSourceRegistry
 import com.example.aichat.ui.chat.model.Attachment
 
 /**
- * Kimi-style input bar with three trailing-button states:
- *   - AI is responding → ⏹ Stop
- *   - Input is empty AND no attachments → 🎤 mic (press-and-hold to dictate; release sends)
- *   - Otherwise → ➤ send
+ * Floating input bar — Kimi / iMessage style.
  *
- * Attachments: ⊕ opens a bottom sheet (Camera / Gallery / Files). The camera
- * source goes through a real [androidx.core.content.FileProvider] URI so the
- * system camera app writes directly into our cache — no more fallback to gallery.
+ * Layout:
+ *   - No outer container: the bar floats over the chat list with transparent
+ *     background (Scaffold's bottomBar slot is intentionally left empty so
+ *     no divider line is drawn).
+ *   - The whole pill (attachments preview + TextField + inline buttons) is a
+ *     single [Surface] with [surfaceVariant] fill + 24dp corner radius.
+ *   - ⊕ (add attachment) sits as the TextField's leading icon; Stop / Mic /
+ *     Send sit as the trailing icon. They never overflow below the pill.
  *
- * Keyboard: the whole bar uses [Modifier.imePadding] + [Modifier.navigationBarsPadding]
- * so it always sits above the IME (and the keyboard never overlaps the input field).
+ * Button state machine (trailing):
+ *   - isLoading → ⏹ Stop
+ *   - input empty AND no attachments AND voice available → 🎤 Mic
+ *       (press-and-hold via [InteractionSource.collectIsPressedAsState] —
+ *        more reliable than detectTapGestures; release auto-sends)
+ *   - otherwise → ➤ Send
+ *
+ * Keyboard: [Modifier.imePadding] + [Modifier.navigationBarsPadding] keep
+ * the pill above the IME.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatInputBar(
     isLoading: Boolean,
@@ -95,10 +102,8 @@ fun ChatInputBar(
     val keyboard = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
 
-    // Camera capture URI is held transiently between launching TakePicture and the result callback
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 
-    // Runtime permissions for camera + microphone
     var hasCameraPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
@@ -126,13 +131,11 @@ fun ChatInputBar(
         pendingCameraUri = null
     }
 
-    // Permission launchers — declared AFTER cameraLauncher so the callback can re-enter it
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         hasCameraPermission = granted
         if (granted) {
-            // User just approved camera permission — open system camera now
             val uri = CaptureUriProvider.newImageUri(context)
             pendingCameraUri = uri
             cameraLauncher.launch(uri)
@@ -142,9 +145,8 @@ fun ChatInputBar(
         ActivityResultContracts.RequestPermission()
     ) { granted -> hasMicPermission = granted }
 
-    // ── Voice recognizer (release-to-send) ────────────────────────────────
+    // Voice recognizer — release auto-sends transcribed text
     val voice = rememberVoiceRecognizer(onResult = { recognized ->
-        // Auto-send transcribed text + any pending attachments
         val clean = recognized.trim()
         if (clean.isNotEmpty() || pendingAttachments.isNotEmpty()) {
             onSend(clean, pendingAttachments)
@@ -153,26 +155,30 @@ fun ChatInputBar(
         }
     })
 
+    // ── Pill container ─────────────────────────────────────────────────────
     Surface(
         modifier = modifier
             .fillMaxWidth()
             .navigationBarsPadding()
             .imePadding(),
-        tonalElevation = 2.dp,
-        color = MaterialTheme.colorScheme.surface
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        // No tonalElevation → no divider/shadow line, pill looks floating
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .padding(horizontal = 4.dp, vertical = 4.dp)
         ) {
-            // 1) Pending attachments preview
+            // Attachment previews (inside the pill)
             if (pendingAttachments.isNotEmpty()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
-                        .padding(bottom = 4.dp),
+                        .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 2.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     pendingAttachments.forEach { attachment ->
@@ -184,160 +190,150 @@ fun ChatInputBar(
                 }
             }
 
-            // 2) Functional row: ⊕ + input + trailing button
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom
-            ) {
-                // ⊕ attachment button
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(percent = 50))
-                        .clickable(enabled = !isLoading) { showSheet = true },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Add,
-                        contentDescription = "添加附件",
-                        tint = if (isLoading) MaterialTheme.colorScheme.outline
-                               else MaterialTheme.colorScheme.primary
-                    )
-                }
-
-                Spacer(Modifier.width(8.dp))
-
-                // Multi-line input — capsule shape
-                TextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 40.dp, max = 144.dp),
-                    placeholder = {
-                        val hint = when {
-                            isLoading -> "AI 正在回复..."
-                            voice.isAvailable && text.isBlank() -> "说点什么，或按住 🎤 说话"
-                            else -> "说点什么吧..."
-                        }
-                        Text(text = hint)
-                    },
-                    enabled = !isLoading,
-                    maxLines = 5,
-                    shape = RoundedCornerShape(20.dp),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                        disabledIndicatorColor = Color.Transparent
-                    ),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
-                    keyboardActions = KeyboardActions(onSend = {
-                        val trimmed = text.trim()
-                        if (trimmed.isNotEmpty() || pendingAttachments.isNotEmpty()) {
-                            onSend(trimmed, pendingAttachments)
-                            text = ""
-                            keyboard?.hide()
-                        }
-                    })
-                )
-
-                Spacer(Modifier.width(8.dp))
-
-                // Trailing button: Stop | Mic | Send
-                when {
-                    isLoading -> {
-                        IconButton(onClick = onStop, modifier = Modifier.size(40.dp)) {
+            // Input row — TextField with embedded leading (⊕) + trailing (Stop/Mic/Send) icons
+            TextField(
+                value = text,
+                onValueChange = { text = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp, max = 144.dp),
+                placeholder = {
+                    val hint = when {
+                        isLoading -> "AI 正在回复..."
+                        voice.isAvailable && text.isBlank() -> "说点什么，或按住 🎤 说话"
+                        else -> "说点什么吧..."
+                    }
+                    Text(text = hint)
+                },
+                enabled = !isLoading,
+                maxLines = 5,
+                shape = RoundedCornerShape(24.dp),
+                leadingIcon = {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(percent = 50))
+                            .clickable(enabled = !isLoading) { showSheet = true },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Add,
+                            contentDescription = "添加附件",
+                            tint = if (isLoading) MaterialTheme.colorScheme.outline
+                                   else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                },
+                trailingIcon = {
+                    when {
+                        isLoading -> {
                             Icon(
                                 imageVector = Icons.Filled.StopCircle,
                                 contentDescription = "停止生成",
-                                tint = MaterialTheme.colorScheme.error
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(percent = 50))
+                                    .clickable(onClick = onStop)
+                                    .padding(8.dp)
                             )
                         }
-                    }
-                    text.isBlank() && pendingAttachments.isEmpty() && voice.isAvailable -> {
-                        // Mic button — press-and-hold to dictate; release auto-sends
-                        val isListening = voice.isListening.value
-                        MicButton(
-                            active = isListening,
-                            enabled = !isLoading,
-                            modifier = Modifier.size(40.dp),
-                            onPress = {
-                                if (!hasMicPermission) {
-                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                } else {
-                                    voice.start()
-                                }
-                            },
-                            onRelease = { voice.stop() }
-                        )
-                    }
-                    else -> {
-                        val canSend = text.isNotBlank() || pendingAttachments.isNotEmpty()
-                        IconButton(
-                            onClick = {
-                                if (canSend) {
-                                    onSend(text.trim(), pendingAttachments)
-                                    text = ""
-                                    keyboard?.hide()
-                                }
-                            },
-                            enabled = canSend,
-                            modifier = Modifier.size(40.dp)
-                        ) {
+                        text.isBlank() && pendingAttachments.isEmpty() && voice.isAvailable -> {
+                            MicButton(
+                                active = voice.isListening.value,
+                                enabled = !isLoading,
+                                modifier = Modifier.size(48.dp),
+                                onPress = {
+                                    if (!hasMicPermission) {
+                                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    } else {
+                                        voice.start()
+                                    }
+                                },
+                                onRelease = { voice.stop() }
+                            )
+                        }
+                        else -> {
+                            val canSend = text.isNotBlank() || pendingAttachments.isNotEmpty()
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.Send,
                                 contentDescription = "发送",
                                 tint = if (canSend) MaterialTheme.colorScheme.primary
-                                       else MaterialTheme.colorScheme.outline
+                                       else MaterialTheme.colorScheme.outline,
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(percent = 50))
+                                    .clickable(enabled = canSend) {
+                                        if (canSend) {
+                                            onSend(text.trim(), pendingAttachments)
+                                            text = ""
+                                            keyboard?.hide()
+                                        }
+                                    }
+                                    .padding(8.dp)
                             )
                         }
                     }
-                }
-            }
-        }
-
-        if (showSheet) {
-            AttachmentSheet(
-                sources = AttachmentSourceRegistry().all,
-                onPick = { source ->
-                    showSheet = false
-                    when (source) {
-                        AttachmentSource.Camera -> {
-                            if (!hasCameraPermission) {
-                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                            } else {
-                                val uri = CaptureUriProvider.newImageUri(context)
-                                pendingCameraUri = uri
-                                cameraLauncher.launch(uri)
-                            }
-                        }
-                        AttachmentSource.Gallery -> galleryLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                        )
-                        AttachmentSource.Files -> fileLauncher.launch("*/*")
-                    }
                 },
-                onDismiss = { showSheet = false }
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedContainerColor = Color.Transparent,
+                    disabledContainerColor = Color.Transparent,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledIndicatorColor = Color.Transparent
+                ),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                keyboardActions = KeyboardActions(onSend = {
+                    val trimmed = text.trim()
+                    if (trimmed.isNotEmpty() || pendingAttachments.isNotEmpty()) {
+                        onSend(trimmed, pendingAttachments)
+                        text = ""
+                        keyboard?.hide()
+                    }
+                })
             )
         }
     }
+
+    if (showSheet) {
+        AttachmentSheet(
+            sources = AttachmentSourceRegistry().all,
+            onPick = { source ->
+                showSheet = false
+                when (source) {
+                    AttachmentSource.Camera -> {
+                        if (!hasCameraPermission) {
+                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        } else {
+                            val uri = CaptureUriProvider.newImageUri(context)
+                            pendingCameraUri = uri
+                            cameraLauncher.launch(uri)
+                        }
+                    }
+                    AttachmentSource.Gallery -> galleryLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                    )
+                    AttachmentSource.Files -> fileLauncher.launch("*/*")
+                }
+            },
+            onDismiss = { showSheet = false }
+        )
+    }
 }
 
-/** Standalone helper (kept for symmetry with permission callback path). */
-private fun launchCamera(
-    context: android.content.Context,
-    setUri: (Uri?) -> Unit,
-    setRef: (Uri?) -> Unit,
-    @Suppress("UNUSED_PARAMETER") noop: () -> Unit
-) {
-    val uri = CaptureUriProvider.newImageUri(context)
-    setUri(uri); setRef(uri)
-}
-
-/** Mic icon that pulses while actively listening. Uses press-and-hold via pointerInput. */
+/**
+ * Press-and-hold Mic button.
+ *
+ * Uses [MutableInteractionSource.collectIsPressedAsState] instead of
+ * `detectTapGestures(onPress = ...)`. The InteractionSource path is the
+ * officially recommended way for press-and-hold in Compose and survives
+ * recomposition + configuration changes more reliably.
+ *
+ * While pressed → onStart(). On release → onStop(). The visual ripple +
+ * pulse animation gives immediate feedback even if ASR hasn't received
+ * audio yet.
+ */
 @Composable
 private fun MicButton(
     active: Boolean,
@@ -346,6 +342,15 @@ private fun MicButton(
     onPress: () -> Unit,
     onRelease: () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+
+    // Drive the recognizer start/stop from the pressed state
+    LaunchedEffect(isPressed) {
+        if (!enabled) return@LaunchedEffect
+        if (isPressed) onPress() else onRelease()
+    }
+
     val transition = rememberInfiniteTransition(label = "mic")
     val pulseAlpha by transition.animateFloat(
         initialValue = 1f,
@@ -358,19 +363,15 @@ private fun MicButton(
         modifier = modifier
             .clip(RoundedCornerShape(percent = 50))
             .background(
-                if (active) MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
+                if (active) MaterialTheme.colorScheme.error.copy(alpha = 0.18f)
                 else Color.Transparent
             )
-            .pointerInput(enabled) {
-                if (!enabled) return@pointerInput
-                detectTapGestures(
-                    onPress = {
-                        onPress()
-                        tryAwaitRelease()
-                        onRelease()
-                    }
-                )
-            },
+            .clickable(
+                interactionSource = interactionSource,
+                indication = rememberRipple(bounded = false, radius = 24.dp),
+                enabled = enabled,
+                onClick = { /* press handled via interactionSource */ }
+            ),
         contentAlignment = Alignment.Center
     ) {
         Icon(
@@ -378,7 +379,9 @@ private fun MicButton(
             contentDescription = if (active) "正在聆听..." else "按住说话",
             tint = if (active) MaterialTheme.colorScheme.error
                    else MaterialTheme.colorScheme.primary,
-            modifier = Modifier.alpha(if (active) pulseAlpha else 1f)
+            modifier = Modifier
+                .alpha(if (active) pulseAlpha else 1f)
+                .padding(10.dp)
         )
     }
 }

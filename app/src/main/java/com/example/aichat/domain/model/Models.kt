@@ -46,5 +46,17 @@ data class MessageMetadata(
     val durationMs: Long? = null,
     val tokenCount: Int? = null,
     val interruptedReason: String? = null,
-    val errorCategory: String? = null
-)
+    val errorCategory: String? = null,
+    val searchResults: List<SearchResult> = emptyList()
+) {
+    /**
+     * One retrieved web/document hit surfaced by RAG.
+     * `url` may be null for local-doc-only backends.
+     */
+    data class SearchResult(
+        val title: String,
+        val snippet: String,
+        val url: String?,
+        val score: Float = 0f
+    )
+}
