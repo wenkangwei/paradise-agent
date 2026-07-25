@@ -12,24 +12,53 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.example.aichat.MainActivity
+import com.example.aichat.domain.usecase.StreamAiReplyUseCase
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import com.example.aichat.ui.chat.model.Attachment
+
+private val gson = Gson()
+
+private fun parseAttachments(json: String): List<Attachment> {
+    return runCatching {
+        val type = object : TypeToken<List<Attachment>>() {}.type
+        gson.fromJson<List<Attachment>>(json, type) ?: emptyList()
+    }.getOrDefault(emptyList())
+}
 
 /**
- * Foreground service that keeps the app process alive while an AI stream is
- * running, so that locking the screen or switching apps does not abort the
- * SSE connection.
+ * Foreground service that runs in a dedicated `:streaming` process.
  *
- * The service does not perform the request itself - [com.example.aichat.ui.chat.ChatViewModel]
- * runs the streaming coroutine in an application-level scope. This service
- * merely elevates the process to foreground priority and holds a WakeLock so
- * Android Doze / app standby cannot freeze the network stack.
+ * Why a separate process?
+ *   On aggressive OEM ROMs (Xiaomi/Huawei/OPPO/vivo) swiping the app away or
+ *   locking the screen kills the main app process. If the streaming request
+ *   runs in that process, the connection dies with it. A separate process + a
+ *   foreground notification gives the streaming task a much better chance of
+ *   surviving until the LLM finishes.
+ *
+ * The service delegates the actual work to [StreamAiReplyUseCase], which reads
+ * history from Room, streams the response, and writes the partial/final reply
+ * back to Room. The UI observes the same Room database and updates itself.
  */
 @AndroidEntryPoint
 class StreamingService : Service() {
 
     @Inject
+    lateinit var useCase: StreamAiReplyUseCase
+
+    @Inject
     lateinit var wakeLockProvider: StreamingWakeLock
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var streamingJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -40,23 +69,58 @@ class StreamingService : Service() {
         val action = intent?.action ?: ACTION_START
         when (action) {
             ACTION_START -> {
+                val conversationId = intent?.getStringExtra(EXTRA_CONVERSATION_ID)
+                val text = intent?.getStringExtra(EXTRA_TEXT) ?: ""
+                val attachmentsJson = intent?.getStringExtra(EXTRA_ATTACHMENTS_JSON) ?: "[]"
+                if (conversationId == null || streamingJob?.isActive == true) {
+                    stopIfIdle()
+                    return START_STICKY
+                }
+
                 startForeground(NOTIFICATION_ID, buildNotification())
                 wakeLockProvider.acquire(this)
+
+                val attachments = parseAttachments(attachmentsJson)
+                streamingJob = serviceScope.launch {
+                    useCase(
+                        conversationId = conversationId,
+                        text = text,
+                        attachments = attachments
+                    ) { error ->
+                        // Errors are written via Room/notification; the service itself
+                        // does not crash the UI process.
+                    }
+                    // Stream finished (complete, interrupted or error) - tear down.
+                    stopSelf()
+                }
             }
             ACTION_STOP -> {
-                wakeLockProvider.release()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                streamingJob?.cancel()
+                stopService()
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        wakeLockProvider.release()
+        streamingJob?.cancel()
+        serviceScope.cancel()
+        stopService()
         super.onDestroy()
+    }
+
+    private fun stopService() {
+        wakeLockProvider.release()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun stopIfIdle() {
+        if (streamingJob?.isActive != true) {
+            stopService()
+        }
     }
 
     private fun createNotificationChannel() {
@@ -66,7 +130,7 @@ class StreamingService : Service() {
                 "AI 流式回复",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "保持后台连接，让 AI 回复在锁屏时也能继续"
+                description = "保持后台连接，让 AI 回复在锁屏或切换应用时继续"
                 setShowBadge(false)
             }
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -101,10 +165,16 @@ class StreamingService : Service() {
         private const val NOTIFICATION_ID = 0x5354_5245 // "STRE"
         const val ACTION_START = "com.example.aichat.action.START_STREAMING"
         const val ACTION_STOP = "com.example.aichat.action.STOP_STREAMING"
+        const val EXTRA_CONVERSATION_ID = "conversation_id"
+        const val EXTRA_TEXT = "text"
+        const val EXTRA_ATTACHMENTS_JSON = "attachments_json"
 
-        fun start(context: Context) {
+        fun start(context: Context, conversationId: String, text: String, attachmentsJson: String) {
             val intent = Intent(context, StreamingService::class.java).apply {
                 action = ACTION_START
+                putExtra(EXTRA_CONVERSATION_ID, conversationId)
+                putExtra(EXTRA_TEXT, text)
+                putExtra(EXTRA_ATTACHMENTS_JSON, attachmentsJson)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -123,10 +193,9 @@ class StreamingService : Service() {
 }
 
 /**
- * Injectable wrapper around [PowerManager.WakeLock] so both the Service and the
- * ViewModel can request CPU wake without duplicating the logic.
+ * Injectable wrapper around [PowerManager.WakeLock].
  */
-class StreamingWakeLock {
+class StreamingWakeLock @Inject constructor() {
     private var wakeLock: PowerManager.WakeLock? = null
 
     @Synchronized

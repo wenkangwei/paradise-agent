@@ -12,6 +12,7 @@
     <!-- Foreground service for streaming while screen is off / app is in background -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Let the user disable battery optimisation for the app so background
          streaming survives screen-off on aggressive OEM ROMs (Xiaomi/Huawei). -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -43,6 +44,7 @@
         <service
             android:name=".service.StreamingService"
             android:exported="false"
+            android:process=":streaming"
             android:foregroundServiceType="dataSync" />
 
         <provider

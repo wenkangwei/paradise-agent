@@ -29,6 +29,7 @@ object DatabaseModule {
         "aichat.db"
     )
         .addMigrations(*ALL_MIGRATIONS)
+        .enableMultiInstanceInvalidation()
         .build()
 
     @Provides
