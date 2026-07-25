@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <!-- Keep CPU awake during streaming so Doze doesn't kill the SSE connection -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Foreground service for streaming while screen is off / app is in background -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Let the user disable battery optimisation for the app so background
          streaming survives screen-off on aggressive OEM ROMs (Xiaomi/Huawei). -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -36,6 +39,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".service.StreamingService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

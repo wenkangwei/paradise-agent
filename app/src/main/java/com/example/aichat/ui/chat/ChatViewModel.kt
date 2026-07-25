@@ -2,7 +2,6 @@ package com.example.aichat.ui.chat
 
 import android.content.Context
 import android.net.Uri
-import android.os.PowerManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.aichat.data.provider.StreamEvent
@@ -11,11 +10,14 @@ import com.example.aichat.data.remote.AttachmentEncoder
 import com.example.aichat.data.remote.ChatRemoteDataSource
 import com.example.aichat.data.remote.NetworkException
 import com.example.aichat.data.repository.ApiProfileRepository
+import com.example.aichat.di.ApplicationScope
 import com.example.aichat.domain.model.Message
 import com.example.aichat.domain.model.MessageMetadata
 import com.example.aichat.domain.model.MessageStatus
 import com.example.aichat.domain.model.Role
 import com.example.aichat.domain.repository.ChatRepository
+import com.example.aichat.service.StreamingService
+import com.example.aichat.service.StreamingWakeLock
 import com.example.aichat.ui.chat.model.Attachment
 import com.example.aichat.ui.chat.model.ChatMessage
 import com.example.aichat.ui.chat.model.toChatMessages
@@ -23,6 +25,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -45,7 +48,9 @@ class ChatViewModel @Inject constructor(
     private val repository: ChatRepository,
     private val remoteDataSource: ChatRemoteDataSource,
     private val apiProfileRepo: ApiProfileRepository,
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    @ApplicationScope private val appScope: CoroutineScope,
+    private val streamingWakeLock: StreamingWakeLock
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ChatUiState())
@@ -56,7 +61,8 @@ class ChatViewModel @Inject constructor(
 
     private var streamingJob: Job? = null
     private var messagesObserverJob: Job? = null
-    private var wakeLock: PowerManager.WakeLock? = null
+    private val applicationScope: CoroutineScope
+        get() = appScope
 
     /**
      * Cap on how many recent history messages get their attachments re-encoded
@@ -85,6 +91,10 @@ class ChatViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        // Intentionally NOT cancelling streamingJob here - it runs in
+        // applicationScope and must survive Activity recreation (screen rotate,
+        // lock/unlock). The service keeps the process alive; the job cleans
+        // itself up when the stream finishes.
         releaseWakeLock()
     }
 
@@ -123,8 +133,18 @@ class ChatViewModel @Inject constructor(
         messagesObserverJob?.cancel()
         messagesObserverJob = viewModelScope.launch {
             repository.observeMessages(conversationId).collect { messages ->
-                if (!_uiState.value.isStreaming) {
-                    _uiState.update { it.copy(messages = messages.toChatMessages()) }
+                val hasStreaming = messages.any { it.status == MessageStatus.STREAMING }
+                _uiState.update { state ->
+                    if (state.isStreaming && hasStreaming) {
+                        // The streaming coroutine in applicationScope is driving
+                        // the UI directly; skip Room updates to avoid cursor jumps.
+                        state
+                    } else {
+                        state.copy(
+                            messages = messages.toChatMessages(),
+                            isStreaming = hasStreaming
+                        )
+                    }
                 }
             }
         }
@@ -147,9 +167,10 @@ class ChatViewModel @Inject constructor(
 
         _uiState.update { it.copy(pendingAttachments = emptyList()) }
 
-        streamingJob = viewModelScope.launch(exceptionHandler) {
+        streamingJob = applicationScope.launch(exceptionHandler) {
             _uiState.update { it.copy(isLoading = true, error = null) }
-            acquireWakeLock()
+            streamingWakeLock.acquire(context)
+            StreamingService.start(context)
 
             try {
                 val conversationId = _uiState.value.currentConversationId
@@ -370,7 +391,8 @@ class ChatViewModel @Inject constructor(
                 handleError(e.message ?: "Unexpected error", text, sendAttachments, retryable = false)
             } finally {
                 _uiState.update { it.copy(isLoading = false) }
-                releaseWakeLock()
+                streamingWakeLock.release()
+                StreamingService.stop(context)
             }
         }
     }
@@ -380,21 +402,13 @@ class ChatViewModel @Inject constructor(
      * screen turns off. Without this, Android Doze defers/suspends network
      * activity and the SSE connection silently dies, taking the partial AI
      * reply with it.
+     *
+     * Replaced by [StreamingWakeLock] + [StreamingService]; kept here as a
+     * no-op marker for documentation.
      */
-    private fun acquireWakeLock() {
-        runCatching {
-            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "aichat::streaming:${System.currentTimeMillis()}"
-            ).apply { acquire(10 * 60 * 1000L) } // 10 min hard cap as a safety net
-        }
-    }
+    private fun acquireWakeLock() {}
 
-    private fun releaseWakeLock() {
-        wakeLock?.let { runCatching { if (it.isHeld) it.release() } }
-        wakeLock = null
-    }
+    private fun releaseWakeLock() {}
 
     private suspend fun handleError(
         message: String,
@@ -459,6 +473,8 @@ class ChatViewModel @Inject constructor(
         streamingJob?.cancel()
         _uiState.update { it.copy(isLoading = false) }
         releaseWakeLock()
+        streamingWakeLock.release()
+        StreamingService.stop(context)
     }
 
     fun newChat() {

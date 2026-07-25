@@ -223,12 +223,41 @@ USER: <用户首条消息原文>
 - `data/local/dao/MessageDao.kt`
 - `DEVELOPMENT_LOG.md`
 
-### 经验小结
-1. **流式 AI 必须增量落库**——否则一次进程杀/闪退就把用户等了几秒的内容全清空，体验不可接受
-2. **base64 多模态是内存炸弹**——绝不能把整个对话历史的附件全部同时编码，要么限制历史长度，要么做流式 parts 上传
-3. **手写 markdown parser 必须设防**——LLM 输出不可控，再简单的 parser 也要加迭代上限 + fallback
-4. **Android 息屏杀后台是系统行为**——不要指望默认状态能保住 SSE 长连接；`WAKE_LOCK` + 电池优化白名单 + `FLAG_KEEP_SCREEN_ON` 三件套是标配
-5. **WakeLock 要带硬超时**——这里用 10 分钟，防止协程泄漏导致一直持锁
+#### 2 — 息屏保活（补充）
+- 仅 `WAKE_LOCK` 不够：Activity 重建 / 应用切换到后台后系统仍可能回收 socket，报 `software caused connection abort`
+- 新增 `StreamingService` 前台服务，流式开始时启动通知栏保活，结束时停止
+- `ChatViewModel` 的 streaming 协程从 `viewModelScope` 改到 `@ApplicationScope`，Activity 重建后任务继续运行
+- `observeMessages` 检测到 Room 里有 `STREAMING` 状态的占位消息时，自动恢复 `isStreaming` 状态
+- `StreamingWakeLock` 单例封装，Service 和 ViewModel 共享同一把锁
+- `ChatScreen` 仍用 `FLAG_KEEP_SCREEN_ON` 保持亮屏
+- AndroidManifest 增加 `FOREGROUND_SERVICE` 和 `FOREGROUND_SERVICE_DATA_SYNC` 权限，声明 `StreamingService` 的 `foregroundServiceType="dataSync"`
+
+#### 4 — HTML 页面卡片渲染
+- AI 回复若是完整 HTML 页面（`<!DOCTYPE` / `<html` / `<head>...<body>...`）则显示 `HtmlCard`
+- `HtmlCard` 内嵌 WebView，高度 120-360dp，可复制源码
+- 默认禁用 JS，避免 LLM 生成页面执行任意代码
+- 普通 markdown/HTML 片段仍走 `MarkdownText`
+
+### 文件变更（更新）
+- `AndroidManifest.xml`
+- `ui/chat/ChatViewModel.kt`
+- `ui/chat/ChatScreen.kt`
+- `ui/chat/MarkdownText.kt`
+- `ui/chat/HtmlCard.kt`（新增）
+- `service/StreamingService.kt`（新增）
+- `di/AppModule.kt`
+- `data/repository/ChatRepositoryImpl.kt`
+- `data/repository/ChatRepository.kt`
+- `data/local/dao/MessageDao.kt`
+- `DEVELOPMENT_LOG.md`
+
+### 经验小结（更新）
+1. **流式 AI 必须增量落库**
+2. **base64 多模态是内存炸弹**
+3. **手写 markdown parser 必须设防**
+4. **Android 息屏杀后台是系统行为** — `WAKE_LOCK` 只保 CPU，要真正保活 SSE 长连接必须上前台 Service + Application scope；Activity 重建不应取消流式协程
+5. **WakeLock 要带硬超时**
+6. **WebView 渲染 HTML 页面要关 JS、限高度** — LLM 生成页面不可信，禁用 JavaScript 是最低成本的安全基线
 
 ---
 

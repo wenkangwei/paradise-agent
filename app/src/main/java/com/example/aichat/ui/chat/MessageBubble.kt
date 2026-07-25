@@ -157,6 +157,9 @@ fun MessageBubble(
                                     color = chatColors.onUserBubbleColor,
                                     style = MaterialTheme.typography.bodyMedium
                                 )
+                            } else if (!message.isStreaming && looksLikeHtmlPage(message.content)) {
+                                // Complete HTML page - render as an embedded WebView card
+                                HtmlCard(html = message.content)
                             } else {
                                 MarkdownText(
                                     text = message.content,
