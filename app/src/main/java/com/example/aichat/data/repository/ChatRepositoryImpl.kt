@@ -124,6 +124,12 @@ class ChatRepositoryImpl @Inject constructor(
             messageDao.updateReaction(messageId, reaction)
         }
 
+    override suspend fun markDanglingStreamingInterrupted(reason: String) =
+        withContext(ioDispatcher) {
+            val metadataJson = gson.toJson(MessageMetadata(interruptedReason = reason))
+            messageDao.markStreamingAsInterrupted(metadataJson)
+        }
+
     private fun deriveTitle(content: String): String {
         val trimmed = content.trim().take(50)
         return if (trimmed.isEmpty()) "New Conversation" else trimmed

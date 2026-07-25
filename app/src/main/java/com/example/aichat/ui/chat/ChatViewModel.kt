@@ -164,7 +164,12 @@ class ChatViewModel @Inject constructor(
                 )
                 withContext(Dispatchers.IO) { repository.appendMessage(userMessage) }
 
-                // Optimistic UI.
+                // Optimistic UI. The AI placeholder id is generated here and
+                // propagated to the service so the Room row the service writes
+                // shares the same id — when the observer pulls the new row in,
+                // it matches the optimistic placeholder instead of producing a
+                // duplicate.
+                val aiMessageId = UUID.randomUUID().toString()
                 val userChatMessage = ChatMessage(
                     id = userMessage.id,
                     role = com.example.aichat.ui.chat.model.Role.USER,
@@ -172,7 +177,7 @@ class ChatViewModel @Inject constructor(
                     attachments = persistedAttachments
                 )
                 val streamingAiMessage = ChatMessage(
-                    id = UUID.randomUUID().toString(),
+                    id = aiMessageId,
                     role = com.example.aichat.ui.chat.model.Role.ASSISTANT,
                     content = "",
                     isStreaming = true
@@ -188,7 +193,8 @@ class ChatViewModel @Inject constructor(
                     context = context,
                     conversationId = conversationId,
                     text = trimmed,
-                    attachmentsJson = gson.toJson(persistedAttachments)
+                    attachmentsJson = gson.toJson(persistedAttachments),
+                    aiMessageId = aiMessageId
                 )
             } catch (e: Exception) {
                 _events.emit(ChatEvent.ShowError(e.message ?: "启动失败", null))
@@ -220,10 +226,26 @@ class ChatViewModel @Inject constructor(
     /**
      * User-initiated stop. The service receives the stop command and cancels its
      * coroutine; the partial reply has already been persisted incrementally.
+     *
+     * We also flip the optimistic AI placeholder's `isStreaming` here so the
+     * spinner stops immediately — there is a ~100-500ms round-trip before the
+     * service writes INTERRUPTED to Room and the observer picks it up, and
+     * during that window the user has already released the stop button and
+     * expects the UI to react.
      */
     fun stopGenerating() {
         StreamingService.stop(context)
-        _uiState.update { it.copy(isLoading = false) }
+        _uiState.update { state ->
+            state.copy(
+                isLoading = false,
+                isStreaming = false,
+                messages = state.messages.map { msg ->
+                    if (msg.role == com.example.aichat.ui.chat.model.Role.ASSISTANT && msg.isStreaming) {
+                        msg.copy(isStreaming = false)
+                    } else msg
+                }
+            )
+        }
     }
 
     fun newChat() {

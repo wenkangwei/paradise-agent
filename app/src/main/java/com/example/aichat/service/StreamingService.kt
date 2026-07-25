@@ -72,7 +72,8 @@ class StreamingService : Service() {
                 val conversationId = intent?.getStringExtra(EXTRA_CONVERSATION_ID)
                 val text = intent?.getStringExtra(EXTRA_TEXT) ?: ""
                 val attachmentsJson = intent?.getStringExtra(EXTRA_ATTACHMENTS_JSON) ?: "[]"
-                if (conversationId == null || streamingJob?.isActive == true) {
+                val aiMessageId = intent?.getStringExtra(EXTRA_AI_MESSAGE_ID)
+                if (conversationId == null || aiMessageId == null || streamingJob?.isActive == true) {
                     stopIfIdle()
                     return START_STICKY
                 }
@@ -85,7 +86,8 @@ class StreamingService : Service() {
                     useCase(
                         conversationId = conversationId,
                         text = text,
-                        attachments = attachments
+                        attachments = attachments,
+                        aiMessageId = aiMessageId
                     ) { error ->
                         // Errors are written via Room/notification; the service itself
                         // does not crash the UI process.
@@ -168,13 +170,21 @@ class StreamingService : Service() {
         const val EXTRA_CONVERSATION_ID = "conversation_id"
         const val EXTRA_TEXT = "text"
         const val EXTRA_ATTACHMENTS_JSON = "attachments_json"
+        const val EXTRA_AI_MESSAGE_ID = "ai_message_id"
 
-        fun start(context: Context, conversationId: String, text: String, attachmentsJson: String) {
+        fun start(
+            context: Context,
+            conversationId: String,
+            text: String,
+            attachmentsJson: String,
+            aiMessageId: String
+        ) {
             val intent = Intent(context, StreamingService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_CONVERSATION_ID, conversationId)
                 putExtra(EXTRA_TEXT, text)
                 putExtra(EXTRA_ATTACHMENTS_JSON, attachmentsJson)
+                putExtra(EXTRA_AI_MESSAGE_ID, aiMessageId)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)

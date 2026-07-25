@@ -1,6 +1,7 @@
 package com.example.aichat.ui.chat.model
 
 import com.example.aichat.domain.model.MessageMetadata
+import com.example.aichat.domain.model.MessageStatus
 
 data class ChatMessage(
     val id: String,
@@ -10,7 +11,9 @@ data class ChatMessage(
     val attachments: List<Attachment> = emptyList(),
     val reasoningContent: String? = null,
     val metadata: MessageMetadata? = null,
-    val reaction: String? = null
+    val reaction: String? = null,
+    /** Room status, used to decide when to stop the streaming spinner. */
+    val status: MessageStatus? = null
 )
 
 data class Attachment(

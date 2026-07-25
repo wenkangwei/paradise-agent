@@ -37,6 +37,18 @@ interface MessageDao {
     @Query("UPDATE messages SET reaction = :reaction WHERE id = :id")
     suspend fun updateReaction(id: String, reaction: String?)
 
+    /**
+     * Bulk-flip every row stuck in STREAMING to INTERRUPTED, attaching the
+     * supplied metadataJson (e.g. {"interruptedReason":"process_killed"}).
+     * Used on app start to recover from a `:streaming` process that died
+     * mid-stream — otherwise the UI would spin forever on the stale row.
+     */
+    @Query(
+        "UPDATE messages SET status = 'INTERRUPTED', metadataJson = :metadataJson " +
+            "WHERE status = 'STREAMING'"
+    )
+    suspend fun markStreamingAsInterrupted(metadataJson: String)
+
     @Query("SELECT status FROM messages WHERE id = :id")
     suspend fun getStatusById(id: String): String?
 

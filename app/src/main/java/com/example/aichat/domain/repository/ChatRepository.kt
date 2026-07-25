@@ -51,4 +51,11 @@ interface ChatRepository {
 
     /** Set or clear AI message feedback: "like" | "dislike" | null. */
     suspend fun setMessageReaction(messageId: String, reaction: String?)
+
+    /**
+     * Mark every message still in STREAMING state as INTERRUPTED, attaching
+     * the supplied reason to its metadata. Call once on app start to clean
+     * up rows orphaned by a crashed/killed `:streaming` process.
+     */
+    suspend fun markDanglingStreamingInterrupted(reason: String)
 }

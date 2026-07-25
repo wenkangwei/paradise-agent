@@ -57,6 +57,7 @@ class StreamAiReplyUseCase @Inject constructor(
         conversationId: String,
         text: String,
         attachments: List<Attachment>,
+        aiMessageId: String,
         onError: suspend (String) -> Unit = {}
     ) {
         val trimmed = text.trim()
@@ -94,8 +95,9 @@ class StreamAiReplyUseCase @Inject constructor(
             }
 
             // 3. Insert the AI placeholder row up-front so a crash mid-stream
-            //    still leaves a partial reply on disk.
-            val aiMessageId = UUID.randomUUID().toString()
+            //    still leaves a partial reply on disk. The id is provided by the
+            //    caller so the optimistic UI placeholder and the Room row share
+            //    the same id — no duplicate row when the service writes back.
             val aiPlaceholder = Message(
                 id = aiMessageId,
                 conversationId = conversationId,
