@@ -54,9 +54,21 @@ object AttachmentEncoder {
      * [com.example.aichat.domain.model.Attachment.uri] and handed to Coil for
      * display. Coil accepts absolute paths directly.
      *
+     * **Idempotent**: if [sourceUri] is already a `file://` URI or bare
+     * absolute path (i.e. it was persisted by a previous [persist] call),
+     * the input is returned verbatim — no second copy. This prevents
+     * duplicate files on disk and avoids `IOException` when a stale
+     * `pendingAttachments` entry sneaks through.
+     *
      * Must be called on [Dispatchers.IO].
      */
     suspend fun persist(context: Context, sourceUri: Uri): String = withContext(Dispatchers.IO) {
+        val scheme = sourceUri.scheme
+        // Already-persisted path: return as-is. Both "file" scheme and bare
+        // absolute paths (no scheme) are treated as previously persisted.
+        if (scheme == "file" || (scheme == null && sourceUri.toString().startsWith("/"))) {
+            return@withContext sourceUri.toString()
+        }
         val mime = guessMimeType(context, sourceUri)
         val ext = extensionFor(mime, sourceUri, context)
         val target = File(dir(context), "${java.util.UUID.randomUUID()}.$ext")

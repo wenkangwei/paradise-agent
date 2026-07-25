@@ -44,6 +44,17 @@ private fun parseAttachments(json: String): List<Attachment> {
  *   foreground notification gives the streaming task a much better chance of
  *   surviving until the LLM finishes.
  *
+ * # Multi-session concurrency (v4.0)
+ *
+ * The service maintains a `Map<conversationId, Job>` instead of a single
+ * `streamingJob`. This lets multiple sessions stream concurrently: a user
+ * can leave a thinking-model reply running in conversation A while they
+ * switch to B and start a new chat. Each job writes to its own row in Room;
+ * the UI's per-conversation Flow observer picks up only the relevant slice.
+ *
+ * The foreground notification is a single instance whose content text is
+ * updated as the active count changes ("正在回复 N 个对话...").
+ *
  * The service delegates the actual work to [StreamAiReplyUseCase], which reads
  * history from Room, streams the response, and writes the partial/final reply
  * back to Room. The UI observes the same Room database and updates itself.
@@ -58,7 +69,13 @@ class StreamingService : Service() {
     lateinit var wakeLockProvider: StreamingWakeLock
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var streamingJob: Job? = null
+    /**
+     * Active streaming jobs keyed by conversationId. Re-entering the same
+     * conversation cancels its prior job; entering a different conversation
+     * leaves other jobs running (multi-session concurrency).
+     */
+    private val streamingJobs = mutableMapOf<String, Job>()
+    private val jobsLock = Any()
 
     override fun onCreate() {
         super.onCreate()
@@ -66,39 +83,82 @@ class StreamingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action ?: ACTION_START
-        when (action) {
+        // ⚠ Android 14+: startForegroundService() gives us a 5-second window
+        // to call startForeground(). The previous implementation returned
+        // early on the "already streaming" branch WITHOUT calling it, which
+        // reliably crashed with ForegroundServiceDidNotStartInTimeException
+        // the moment a user switched sessions and immediately sent a new
+        // message. Promote to foreground unconditionally up-front.
+        startForeground(NOTIFICATION_ID, buildNotification(activeCount()))
+
+        when (intent?.action ?: ACTION_START) {
             ACTION_START -> {
                 val conversationId = intent?.getStringExtra(EXTRA_CONVERSATION_ID)
                 val text = intent?.getStringExtra(EXTRA_TEXT) ?: ""
                 val attachmentsJson = intent?.getStringExtra(EXTRA_ATTACHMENTS_JSON) ?: "[]"
                 val aiMessageId = intent?.getStringExtra(EXTRA_AI_MESSAGE_ID)
-                if (conversationId == null || aiMessageId == null || streamingJob?.isActive == true) {
-                    stopIfIdle()
-                    return START_STICKY
+
+                if (conversationId == null || aiMessageId == null) {
+                    // Malformed intent — nothing to do. If nothing else is
+                    // running, tear down; otherwise stay alive for the others.
+                    if (activeCount() == 0) stopSelf()
+                    return START_NOT_STICKY
                 }
 
-                startForeground(NOTIFICATION_ID, buildNotification())
+                // Same conversationId re-entered (user re-sent a message in
+                // the same session): cancel the prior job so the UseCase's
+                // NonCancellable finalize block persists partial content as
+                // INTERRUPTED. Other conversations' jobs are untouched.
+                synchronized(jobsLock) {
+                    streamingJobs.remove(conversationId)?.cancel()
+                }
+
                 wakeLockProvider.acquire(this)
-
                 val attachments = parseAttachments(attachmentsJson)
-                streamingJob = serviceScope.launch {
-                    useCase(
-                        conversationId = conversationId,
-                        text = text,
-                        attachments = attachments,
-                        aiMessageId = aiMessageId
-                    ) { error ->
-                        // Errors are written via Room/notification; the service itself
-                        // does not crash the UI process.
+                val job = serviceScope.launch {
+                    try {
+                        useCase(
+                            conversationId = conversationId,
+                            text = text,
+                            attachments = attachments,
+                            aiMessageId = aiMessageId
+                        ) { /* errors already persisted via Room by the UseCase */ }
+                    } finally {
+                        val nowEmpty = synchronized(jobsLock) {
+                            streamingJobs.remove(conversationId)
+                            streamingJobs.isEmpty()
+                        }
+                        if (nowEmpty) {
+                            wakeLockProvider.release()
+                            stopSelf()
+                        } else {
+                            refreshNotification()
+                        }
                     }
-                    // Stream finished (complete, interrupted or error) - tear down.
-                    stopSelf()
                 }
+                synchronized(jobsLock) {
+                    streamingJobs[conversationId] = job
+                }
+                refreshNotification()
             }
             ACTION_STOP -> {
-                streamingJob?.cancel()
-                stopService()
+                // Targeted stop: only the named conversation. If no
+                // EXTRA_CONVERSATION_ID is supplied, stop everything.
+                val targetConvId = intent?.getStringExtra(EXTRA_CONVERSATION_ID)
+                synchronized(jobsLock) {
+                    if (targetConvId != null) {
+                        streamingJobs.remove(targetConvId)?.cancel()
+                    } else {
+                        streamingJobs.values.forEach { it.cancel() }
+                        streamingJobs.clear()
+                    }
+                }
+                if (activeCount() == 0) {
+                    wakeLockProvider.release()
+                    stopSelf()
+                } else {
+                    refreshNotification()
+                }
             }
         }
         return START_STICKY
@@ -107,21 +167,22 @@ class StreamingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        streamingJob?.cancel()
+        synchronized(jobsLock) {
+            streamingJobs.values.forEach { it.cancel() }
+            streamingJobs.clear()
+        }
         serviceScope.cancel()
-        stopService()
+        runCatching { wakeLockProvider.release() }
+        runCatching { stopForeground(STOP_FOREGROUND_DETACH) }
         super.onDestroy()
     }
 
-    private fun stopService() {
-        wakeLockProvider.release()
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-    }
+    private fun activeCount(): Int = synchronized(jobsLock) { streamingJobs.size }
 
-    private fun stopIfIdle() {
-        if (streamingJob?.isActive != true) {
-            stopService()
+    private fun refreshNotification() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        runCatching {
+            nm.notify(NOTIFICATION_ID, buildNotification(activeCount()))
         }
     }
 
@@ -140,7 +201,7 @@ class StreamingService : Service() {
         }
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(activeCount: Int): Notification {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -150,10 +211,15 @@ class StreamingService : Service() {
             intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val title = if (activeCount > 1) "正在回复 $activeCount 个对话..." else "AI 正在回复..."
+        val content = if (activeCount > 1)
+            "切换应用或锁屏不会中断；可在历史抽屉查看进度"
+        else
+            "保持前台运行，锁屏或切换应用不会中断"
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("AI 正在回复...")
-            .setContentText("保持前台运行，锁屏或切换应用不会中断")
+            .setContentTitle(title)
+            .setContentText(content)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -193,11 +259,25 @@ class StreamingService : Service() {
             }
         }
 
+        /**
+         * Stop the stream for a specific conversation only. Other in-flight
+         * streams are left alone.
+         */
+        fun stop(context: Context, conversationId: String) {
+            val intent = Intent(context, StreamingService::class.java).apply {
+                action = ACTION_STOP
+                putExtra(EXTRA_CONVERSATION_ID, conversationId)
+            }
+            runCatching { context.startService(intent) }
+        }
+
+        /** Stop every active stream. Use when the user navigates away or the
+         *  app is being destroyed. */
         fun stop(context: Context) {
             val intent = Intent(context, StreamingService::class.java).apply {
                 action = ACTION_STOP
             }
-            context.startService(intent)
+            runCatching { context.startService(intent) }
         }
     }
 }

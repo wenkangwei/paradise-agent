@@ -2,6 +2,7 @@ package com.example.aichat.ui.chat.model
 
 import android.net.Uri
 import com.example.aichat.domain.model.Message
+import com.example.aichat.domain.model.MessageStatus
 import com.example.aichat.domain.model.Role as DomainRole
 
 /**
@@ -9,6 +10,12 @@ import com.example.aichat.domain.model.Role as DomainRole
  *
  * Domain attachments (uri = data URL or http URL) are mapped to UI attachments
  * using the same uri for Coil's AsyncImage rendering.
+ *
+ * `isStreaming` is derived from [Message.status] — previously it was hardcoded
+ * to `false`, which caused "AI reply invisible" bugs because the optimistic-UI
+ * merge path was the only way to set `isStreaming=true`. Once that merge was
+ * bypassed (e.g. user switched sessions and back), the streaming bubble was
+ * rendered as if it were complete but with empty content.
  */
 fun Message.toChatMessage(): ChatMessage {
     return ChatMessage(
@@ -19,7 +26,7 @@ fun Message.toChatMessage(): ChatMessage {
             DomainRole.SYSTEM -> Role.SYSTEM
         },
         content = content,
-        isStreaming = false,
+        isStreaming = status == MessageStatus.STREAMING,
         attachments = attachments.map { it.toUiAttachment() },
         reasoningContent = reasoningContent,
         metadata = metadata,

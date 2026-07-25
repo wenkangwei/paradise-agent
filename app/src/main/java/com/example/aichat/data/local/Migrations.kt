@@ -104,5 +104,47 @@ val MIGRATION_6_7 = object : Migration(6, 7) {
     }
 }
 
-/** All migrations from the initial v2 schema to the current v7. */
-val ALL_MIGRATIONS = arrayOf(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+/**
+ * v7 → v8: Deduplicate legacy user messages.
+ *
+ * Before v3.5.4, `StreamAiReplyUseCase` re-inserted the user message with a
+ * fresh UUID after `ChatViewModel` had already inserted it — every user turn
+ * ended up duplicated in the database. The code bug was fixed in v3.5.4 but
+ * existing rows were never cleaned up, so users on legacy DBs kept seeing
+ * "message appears twice" when re-entering old sessions.
+ *
+ * This migration keeps the earliest row (MIN(id) lexicographically — UUIDs
+ * are time-ordered so this approximates "first inserted") per
+ * (conversationId, content, timestamp) tuple and deletes the rest.
+ */
+val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // Wrap in a transaction so a partial delete doesn't leave the DB in
+        // an inconsistent state if the process dies mid-migration.
+        db.beginTransaction()
+        try {
+            db.execSQL(
+                """
+                DELETE FROM messages
+                WHERE id NOT IN (
+                    SELECT MIN(id) FROM messages
+                    GROUP BY conversationId, content, timestamp
+                )
+                """.trimIndent()
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+}
+
+/** All migrations from the initial v2 schema to the current v8. */
+val ALL_MIGRATIONS = arrayOf(
+    MIGRATION_2_3,
+    MIGRATION_3_4,
+    MIGRATION_4_5,
+    MIGRATION_5_6,
+    MIGRATION_6_7,
+    MIGRATION_7_8
+)

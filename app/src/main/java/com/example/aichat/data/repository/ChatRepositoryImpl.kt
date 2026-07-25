@@ -130,6 +130,20 @@ class ChatRepositoryImpl @Inject constructor(
             messageDao.markStreamingAsInterrupted(metadataJson)
         }
 
+    override suspend fun markConversationStreamingInterrupted(
+        conversationId: String,
+        reason: String
+    ) = withContext(ioDispatcher) {
+        val metadataJson = gson.toJson(MessageMetadata(interruptedReason = reason))
+        messageDao.markStreamingAsInterruptedForConversation(conversationId, metadataJson)
+    }
+
+    override fun observeStreamingConversationIds(): Flow<Set<String>> =
+        messageDao.observeStreamingConversationIds().map { it.toSet() }
+
+    override suspend fun getMessageStatus(messageId: String): String? =
+        withContext(ioDispatcher) { messageDao.getStatusById(messageId) }
+
     private fun deriveTitle(content: String): String {
         val trimmed = content.trim().take(50)
         return if (trimmed.isEmpty()) "New Conversation" else trimmed

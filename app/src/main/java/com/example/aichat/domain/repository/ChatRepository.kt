@@ -58,4 +58,27 @@ interface ChatRepository {
      * up rows orphaned by a crashed/killed `:streaming` process.
      */
     suspend fun markDanglingStreamingInterrupted(reason: String)
+
+    /**
+     * Same as [markDanglingStreamingInterrupted] but scoped to a single
+     * conversation. Used before inserting a new AI placeholder so a stale
+     * STREAMING row from a killed previous run does not collide with the
+     * new one and confuse the UI observer.
+     */
+    suspend fun markConversationStreamingInterrupted(
+        conversationId: String,
+        reason: String
+    )
+
+    /**
+     * Emits the set of conversationIds that currently have at least one
+     * message in STREAMING state. Drives the drawer's green-dot indicator
+     * and the ViewModel's concurrent-stream cap.
+     */
+    fun observeStreamingConversationIds(): Flow<Set<String>>
+
+    /** Single-row status read — used by the streaming UseCase to detect
+     *  external sweeps (e.g. app restart dangling cleanup) and bail out
+     *  instead of overwriting INTERRUPTED with STREAMING again. */
+    suspend fun getMessageStatus(messageId: String): String?
 }

@@ -16,5 +16,16 @@ data class ChatUiState(
     val conversations: List<Conversation> = emptyList(),
     val pendingAttachments: List<Attachment> = emptyList(),
     val profiles: List<ApiProfile> = emptyList(),
-    val activeProfile: ApiProfile? = null
+    val activeProfile: ApiProfile? = null,
+    /**
+     * ConversationIds that currently have a STREAMING row in Room.
+     *
+     * - Drives the green-dot indicator on the drawer's conversation items.
+     * - Drives the concurrent-stream cap in `ChatViewModel.sendMessage`
+     *   (rejects new sends beyond `MAX_CONCURRENT_STREAMS`).
+     *
+     * Sourced from `MessageDao.observeStreamingConversationIds`, which is
+     * kept fresh across processes by Room's multi-instance invalidation.
+     */
+    val streamingConversationIds: Set<String> = emptySet()
 )

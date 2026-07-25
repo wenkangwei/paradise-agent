@@ -34,16 +34,25 @@ import kotlinx.coroutines.withContext
 /**
  * ViewModel for the chat screen.
  *
- * Streaming lifecycle note:
- *   The actual AI request is executed by [StreamingService] in a dedicated
- *   `:streaming` process so it survives Activity recreation, screen lock and
- *   aggressive OEM background killers. This ViewModel only:
- *     - manages the optimistic UI state
- *     - persists pending attachments to filesDir
- *     - starts/stops the service
- *     - observes Room for messages and conversations
- *   When the service writes the AI reply back to Room, the Flow collected here
- *   updates the UI automatically.
+ * v4.0 design — **Room is the single source of truth**:
+ *   - No optimistic UI splicing: the messages list is always a snapshot of
+ *     what Room currently has on disk for the active conversation.
+ *   - `isStreaming` / `isLoading` are derived from the messages' status
+ *     (`STREAMING` rows exist → true). The ViewModel never flips them
+ *     manually, which avoids the prior "stop button causes UI to flash
+ *     blank" race.
+ *   - The `:streaming` process inserts the AI placeholder row within ~100ms
+ *     of `sendMessage` and Room's multi-instance invalidation delivers it
+ *     to [observeMessages] automatically.
+ *
+ * Multi-session concurrency:
+ *   - The user can leave a thinking-model reply running in conversation A
+ *     while they start a new chat in B. The drawer shows a green dot on
+ *     any conversation that currently has a STREAMING row.
+ *   - [stopGenerating] only stops the *current* conversation's stream.
+ *   - [selectConversation] / [newChat] deliberately do NOT stop background
+ *     streams — they keep running until they finish naturally or the user
+ *     explicitly stops them.
  */
 @HiltViewModel
 class ChatViewModel @Inject constructor(
@@ -64,6 +73,16 @@ class ChatViewModel @Inject constructor(
     init {
         observeConversations()
         observeApiProfiles()
+        observeStreamingConversations()
+        // One-time sweep of STREAMING rows orphaned by a previous :streaming
+        // process that died mid-stream (app crashed, OEM killed, reboot).
+        // Without this the drawer would show a green dot forever on dead
+        // sessions. Run on first ViewModel init, not Application.onCreate,
+        // so it only fires when the user actually opens the chat screen
+        // (and only in the main process — not the :streaming process).
+        viewModelScope.launch {
+            runCatching { repository.markDanglingStreamingInterrupted("session_init") }
+        }
     }
 
     private fun observeApiProfiles() {
@@ -95,46 +114,44 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Tracks every conversation that currently has a STREAMING row in Room,
+     * regardless of which one the user is currently viewing. Drives:
+     *   - drawer green-dot indicators (visible from any conversation)
+     *   - `MAX_CONCURRENT_STREAMS` cap in [sendMessage]
+     */
+    private fun observeStreamingConversations() {
+        viewModelScope.launch {
+            repository.observeStreamingConversationIds().collect { ids ->
+                _uiState.update { it.copy(streamingConversationIds = ids) }
+            }
+        }
+    }
+
     private fun observeMessages(conversationId: String) {
         messagesObserverJob?.cancel()
         messagesObserverJob = viewModelScope.launch {
+            // Room is the single source of truth. We no longer splice in
+            // optimistic UI placeholders — the :streaming process inserts
+            // the AI placeholder row within ~100ms of `sendMessage`, and
+            // multi-instance invalidation delivers it to this observer.
+            // The mapper now derives `isStreaming` from the row's status,
+            // so the streaming bubble renders correctly even after the
+            // user switches sessions and comes back.
             repository.observeMessages(conversationId).collect { messages ->
                 val hasStreaming = messages.any { it.status == MessageStatus.STREAMING }
                 _uiState.update { state ->
-                    if (state.isStreaming && hasStreaming) {
-                        // The :streaming process writes the partial reply to
-                        // Room every SAVE_INTERVAL_MS; mirror that snapshot
-                        // into the optimistic placeholder so the user actually
-                        // sees tokens stream in (rather than an empty bubble
-                        // + spinner for the whole stream duration).
-                        //
-                        // We keep the optimistic ChatMessage instance so its
-                        // position in the list (and scroll state) is stable;
-                        // only content/reasoning get refreshed. The ID match
-                        // is guaranteed because sendMessage propagates the
-                        // optimistic aiMessageId through to the service.
-                        val snapshot = messages.firstOrNull { it.status == MessageStatus.STREAMING }
-                        if (snapshot != null) {
-                            state.copy(
-                                messages = state.messages.map { msg ->
-                                    if (msg.id == snapshot.id && msg.isStreaming) {
-                                        msg.copy(
-                                            content = snapshot.content,
-                                            reasoningContent = snapshot.reasoningContent
-                                        )
-                                    } else msg
-                                }
-                            )
-                        } else {
-                            state
-                        }
-                    } else {
-                        state.copy(
-                            messages = messages.toChatMessages(),
-                            isStreaming = hasStreaming,
-                            isLoading = hasStreaming
-                        )
-                    }
+                    // Guard against stale collectors: if the user has since
+                    // switched to another conversation, this emission is
+                    // obsolete and must NOT overwrite the current state.
+                    if (state.currentConversationId != conversationId) return@collect
+                    state.copy(
+                        messages = messages.toChatMessages(),
+                        isStreaming = hasStreaming,
+                        // isLoading mirrors hasStreaming so the input bar's
+                        // spinner matches reality.
+                        isLoading = hasStreaming
+                    )
                 }
             }
         }
@@ -143,14 +160,47 @@ class ChatViewModel @Inject constructor(
     /**
      * Send a user message and ask the streaming service to produce an AI reply.
      *
-     * Attachments are persisted to filesDir in this call (needs a UI-context
-     * ContentResolver), then everything else moves to the :streaming process.
+     * v4.0 changes:
+     *   - No optimistic UI splicing — Room is the single source of truth.
+     *   - If the *current* conversation is already streaming, automatically
+     *     stop it first (BUG-12) instead of refusing the send.
+     *   - Honor `MAX_CONCURRENT_STREAMS` across conversations.
      */
     fun sendMessage(text: String, attachments: List<Attachment> = emptyList()) {
         val trimmed = text.trim()
         val sendAttachments = attachments.ifEmpty { _uiState.value.pendingAttachments }
         val hasContent = trimmed.isNotBlank() || sendAttachments.isNotEmpty()
-        if (!hasContent || _uiState.value.isLoading) return
+        if (!hasContent) return
+
+        val convId = _uiState.value.currentConversationId
+        val isCurrentStreaming = convId != null && convId in _uiState.value.streamingConversationIds
+        // If the user is re-sending in a conversation that is currently
+        // streaming, cancel that stream first — the UseCase will finalize
+        // the prior placeholder as INTERRUPTED via its NonCancellable block.
+        // (Smart-cast to non-null is safe because `isCurrentStreaming`
+        // already requires `convId != null`.)
+        if (isCurrentStreaming) {
+            StreamingService.stop(context, convId!!)
+        } else if (_uiState.value.isLoading) {
+            // Loading flag set but no active stream — likely a transient
+            // race; ignore the send rather than risk stacking two streams.
+            return
+        }
+
+        // Cap concurrent active streams across all conversations.
+        val activeCount = _uiState.value.streamingConversationIds.size -
+            (if (isCurrentStreaming) 1 else 0)
+        if (activeCount >= MAX_CONCURRENT_STREAMS) {
+            viewModelScope.launch {
+                _events.emit(
+                    ChatEvent.ShowError(
+                        "同时最多 $MAX_CONCURRENT_STREAMS 个对话进行中，请先停止一个",
+                        null
+                    )
+                )
+            }
+            return
+        }
 
         _uiState.update { it.copy(pendingAttachments = emptyList(), isLoading = true, error = null) }
 
@@ -160,6 +210,9 @@ class ChatViewModel @Inject constructor(
                     ?: repository.createConversation().also { newId ->
                         _uiState.update { it.copy(currentConversationId = newId) }
                     }
+                // Make sure we're observing this conversation so the
+                // :streaming process's writes are reflected in the UI.
+                if (messagesObserverJob == null) observeMessages(conversationId)
 
                 // Persist attachments before handing them to the service.
                 val persistedAttachments = if (sendAttachments.isNotEmpty()) {
@@ -169,8 +222,8 @@ class ChatViewModel @Inject constructor(
                     }
                 } else emptyList()
 
-                // Optimistically append the user message to Room so the service
-                // sees it when it reads history.
+                // Append the user message to Room — the service reads it
+                // from history when building the LLM request.
                 val userMessage = Message(
                     id = UUID.randomUUID().toString(),
                     conversationId = conversationId,
@@ -187,31 +240,11 @@ class ChatViewModel @Inject constructor(
                 )
                 withContext(Dispatchers.IO) { repository.appendMessage(userMessage) }
 
-                // Optimistic UI. The AI placeholder id is generated here and
-                // propagated to the service so the Room row the service writes
-                // shares the same id — when the observer pulls the new row in,
-                // it matches the optimistic placeholder instead of producing a
-                // duplicate.
+                // The AI placeholder row is inserted by the :streaming
+                // process's UseCase, which propagates this same id. When
+                // the observer pulls the new row in, the UI updates
+                // naturally — no optimistic splicing needed.
                 val aiMessageId = UUID.randomUUID().toString()
-                val userChatMessage = ChatMessage(
-                    id = userMessage.id,
-                    role = com.example.aichat.ui.chat.model.Role.USER,
-                    content = trimmed,
-                    attachments = persistedAttachments
-                )
-                val streamingAiMessage = ChatMessage(
-                    id = aiMessageId,
-                    role = com.example.aichat.ui.chat.model.Role.ASSISTANT,
-                    content = "",
-                    isStreaming = true
-                )
-                _uiState.update {
-                    it.copy(
-                        messages = it.messages + userChatMessage + streamingAiMessage,
-                        isStreaming = true
-                    )
-                }
-
                 StreamingService.start(
                     context = context,
                     conversationId = conversationId,
@@ -221,7 +254,7 @@ class ChatViewModel @Inject constructor(
                 )
             } catch (e: Exception) {
                 _events.emit(ChatEvent.ShowError(e.message ?: "启动失败", null))
-                _uiState.update { it.copy(isLoading = false, isStreaming = false) }
+                _uiState.update { it.copy(isLoading = false) }
             }
         }
     }
@@ -247,32 +280,30 @@ class ChatViewModel @Inject constructor(
     }
 
     /**
-     * User-initiated stop. The service receives the stop command and cancels its
-     * coroutine; the partial reply has already been persisted incrementally.
+     * User-initiated stop for the *current* conversation only. Other
+     * conversations' streams keep running in the background.
      *
-     * We also flip the optimistic AI placeholder's `isStreaming` here so the
-     * spinner stops immediately — there is a ~100-500ms round-trip before the
-     * service writes INTERRUPTED to Room and the observer picks it up, and
-     * during that window the user has already released the stop button and
-     * expects the UI to react.
+     * We only flip the input-bar spinner (`isLoading`); the message list
+     * is left untouched and converges naturally once the :streaming
+     * process writes INTERRUPTED to Room (typically 100-500ms later).
+     * This avoids the previous "stop → UI flash to empty" race caused
+     * by manually clearing `isStreaming` while Room still said STREAMING.
      */
     fun stopGenerating() {
-        StreamingService.stop(context)
-        _uiState.update { state ->
-            state.copy(
-                isLoading = false,
-                isStreaming = false,
-                messages = state.messages.map { msg ->
-                    if (msg.role == com.example.aichat.ui.chat.model.Role.ASSISTANT && msg.isStreaming) {
-                        msg.copy(isStreaming = false)
-                    } else msg
-                }
-            )
-        }
+        val convId = _uiState.value.currentConversationId ?: return
+        StreamingService.stop(context, convId)
+        _uiState.update { it.copy(isLoading = false) }
     }
 
+    /**
+     * Start a fresh conversation.
+     *
+     * v4.0: deliberately does NOT stop background streams — the user can
+     * leave a thinking-model reply running in conversation A while they
+     * start a new chat in B. The drawer's green-dot indicator keeps
+     * them informed that A is still in progress.
+     */
     fun newChat() {
-        stopGenerating()
         messagesObserverJob?.cancel()
         _uiState.update {
             it.copy(
@@ -287,8 +318,19 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Switch to an existing conversation. v4.0: does NOT stop background
+     * streams in other conversations — see [newChat] for the rationale.
+     *
+     * Does NOT call `markConversationStreamingInterrupted`: that conflicted
+     * with the :streaming process's persist loop (status bounced between
+     * INTERRUPTED and STREAMING). Instead, if a STREAMING row exists for
+     * this conversation, the observer simply reflects it (green dot + the
+     * streaming bubble continues to render where the :streaming process
+     * left off).
+     */
     fun selectConversation(conversationId: String) {
-        stopGenerating()
+        messagesObserverJob?.cancel()
         val title = _uiState.value.conversations
             .firstOrNull { it.id == conversationId }?.title
             ?.takeIf { it.isNotBlank() && it != "New Conversation" }
@@ -297,9 +339,10 @@ class ChatViewModel @Inject constructor(
                 currentConversationId = conversationId,
                 currentConversationTitle = title,
                 error = null,
-                isLoading = false,
-                isStreaming = false,
                 pendingAttachments = emptyList()
+                // Intentionally do NOT touch messages / isStreaming /
+                // isLoading: observeMessages will emit the current Room
+                // state immediately, which sets them correctly.
             )
         }
         observeMessages(conversationId)
@@ -309,6 +352,10 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 repository.deleteConversation(conversationId)
+                // Stop any in-flight stream for this conversation so the
+                // service doesn't keep writing to a deleted conversation
+                // (FK cascade will have removed the rows anyway).
+                StreamingService.stop(context, conversationId)
                 if (_uiState.value.currentConversationId == conversationId) {
                     newChat()
                 }
@@ -346,5 +393,17 @@ class ChatViewModel @Inject constructor(
         // Do NOT stop the streaming service here - it runs in the :streaming
         // process and must survive Activity recreation.
         super.onCleared()
+    }
+
+    private companion object {
+        /**
+         * Hard cap on concurrently active streams. Reasoning:
+         *   - Each SSE connection holds ~1MB of buffers.
+         *   - Most LLM providers cap concurrent streams per API key
+         *     (glm/kimi: 5-10); going beyond invites 429s.
+         *   - Five parallel chats is well past any realistic usage; if
+         *     the user really needs more they can stop one.
+         */
+        const val MAX_CONCURRENT_STREAMS = 5
     }
 }

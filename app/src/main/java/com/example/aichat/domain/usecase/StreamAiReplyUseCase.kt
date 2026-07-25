@@ -1,7 +1,6 @@
 package com.example.aichat.domain.usecase
 
 import android.content.Context
-import android.net.Uri
 import com.example.aichat.data.provider.StreamEvent
 import com.example.aichat.data.remote.ApiException
 import com.example.aichat.data.remote.AttachmentEncoder
@@ -17,9 +16,7 @@ import com.example.aichat.ui.chat.model.Attachment
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.UUID
 import javax.inject.Inject
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 
@@ -63,38 +60,29 @@ class StreamAiReplyUseCase @Inject constructor(
         val trimmed = text.trim()
 
         try {
-            val now = System.currentTimeMillis()
+            // NOTE: The user message is already persisted by ChatViewModel
+            // BEFORE the service starts (so the optimistic UI has the row
+            // and the service can read it from history). Do NOT re-insert it
+            // here — that was duplicating every user message with a fresh
+            // UUID and producing "message appears twice" on session re-entry.
+            //
+            // Likewise, attachments are already persisted to filesDir by the
+            // ViewModel; filesDir is shared across the main and :streaming
+            // processes of the same app, so no re-persist is needed.
 
-            // 1. Persist attachments to filesDir and rewrite URIs to absolute paths.
-            val persistedAttachments = if (attachments.isNotEmpty()) {
-                attachments.map { uiAtt ->
-                    val filePath = AttachmentEncoder.persist(context, Uri.parse(uiAtt.uri))
-                    uiAtt.copy(uri = filePath)
-                }
-            } else emptyList()
-
-            val domainAttachments = persistedAttachments.map { uiAtt ->
-                com.example.aichat.domain.model.Attachment(
-                    id = uiAtt.id,
-                    mimeType = uiAtt.mimeType,
-                    uri = uiAtt.uri
+            // 1. Sweep any orphaned STREAMING rows for this conversation.
+            //    If a previous run was killed before finalising, its placeholder
+            //    would still carry status=STREAMING and confuse the UI observer
+            //    (which would think a stream is still in flight and refuse to
+            //    render the new one). Mark them INTERRUPTED up-front.
+            runCatching {
+                repository.markConversationStreamingInterrupted(
+                    conversationId,
+                    "superseded_by_new_request"
                 )
             }
 
-            // 2. Insert the user message.
-            val userMessage = Message(
-                id = UUID.randomUUID().toString(),
-                conversationId = conversationId,
-                role = Role.USER,
-                content = trimmed,
-                timestamp = now,
-                attachments = domainAttachments
-            )
-            withContext(NonCancellable) {
-                repository.appendMessage(userMessage)
-            }
-
-            // 3. Insert the AI placeholder row up-front so a crash mid-stream
+            // 2. Insert the AI placeholder row up-front so a crash mid-stream
             //    still leaves a partial reply on disk. The id is provided by the
             //    caller so the optimistic UI placeholder and the Room row share
             //    the same id — no duplicate row when the service writes back.
@@ -110,7 +98,7 @@ class StreamAiReplyUseCase @Inject constructor(
                 repository.appendMessage(aiPlaceholder)
             }
 
-            // 4. Build history and run the SSE request.
+            // 3. Build history and run the SSE request.
             val fullHistory = repository.getMessages(conversationId)
             val hasAnyAttachments = fullHistory.any { it.attachments.isNotEmpty() }
 
@@ -251,6 +239,17 @@ class StreamAiReplyUseCase @Inject constructor(
         updateLastSave: (Long) -> Unit
     ) {
         if (System.currentTimeMillis() - lastSaveMs < SAVE_INTERVAL_MS) return
+        // Pre-check: if an external sweep (app restart, dangling cleanup,
+        // session re-entry) has already marked this row INTERRUPTED/FAILED,
+        // we must NOT overwrite that with STREAMING again — that was the
+        // source of BUG-3 / BUG-13 (status bouncing between INTERRUPTED
+        // and STREAMING on every persist tick). Bail out cleanly; the
+        // collector loop's CancellationException path will finalize.
+        val currentStatus = runCatching { repository.getMessageStatus(aiMessageId) }
+            .getOrNull()
+        if (currentStatus == "INTERRUPTED" || currentStatus == "FAILED") {
+            throw kotlinx.coroutines.CancellationException("interrupted_by_external_sweep")
+        }
         updateLastSave(System.currentTimeMillis())
         val snapContent = contentBuilder.toString()
         val snapReasoning = reasoningBuilder.toString().ifBlank { null }
@@ -271,39 +270,45 @@ class StreamAiReplyUseCase @Inject constructor(
             .getOrDefault(emptyList())
         if (messages.count { it.role == Role.USER } > 1) return
 
-        val system = Message(
-            id = UUID.randomUUID().toString(),
-            conversationId = "",
-            role = Role.SYSTEM,
-            content = "用不超过15个中文字符概括下面用户输入的主题。直接输出标题文字，" +
-                "不要引号、不要标点、不要任何前缀（例如『标题：』）。",
-            timestamp = System.currentTimeMillis()
-        )
-        val user = Message(
-            id = UUID.randomUUID().toString(),
-            conversationId = "",
-            role = Role.USER,
-            content = firstUserMessage,
-            timestamp = System.currentTimeMillis()
-        )
-        val builder = StringBuilder()
-        val title = try {
-            remoteDataSource.streamChat(listOf(system, user)).collect { event ->
-                if (event is StreamEvent.ContentDelta) builder.append(event.text)
+        // Wrap in NonCancellable: if the parent streamingJob is cancelled
+        // mid-stream (user pressed stop), the partial reply is already
+        // finalized but we still want the title to be generated so the
+        // drawer shows something meaningful instead of "New Conversation".
+        withContext(NonCancellable) {
+            val system = Message(
+                id = UUID.randomUUID().toString(),
+                conversationId = "",
+                role = Role.SYSTEM,
+                content = "用不超过15个中文字符概括下面用户输入的主题。直接输出标题文字，" +
+                    "不要引号、不要标点、不要任何前缀（例如『标题：』）。",
+                timestamp = System.currentTimeMillis()
+            )
+            val user = Message(
+                id = UUID.randomUUID().toString(),
+                conversationId = "",
+                role = Role.USER,
+                content = firstUserMessage,
+                timestamp = System.currentTimeMillis()
+            )
+            val builder = StringBuilder()
+            val title = try {
+                remoteDataSource.streamChat(listOf(system, user)).collect { event ->
+                    if (event is StreamEvent.ContentDelta) builder.append(event.text)
+                }
+                val cleaned = builder.toString()
+                    .trim()
+                    .lines()
+                    .joinToString("")
+                    .replace("\"", "")
+                    .replace("「", "")
+                    .replace("」", "")
+                    .take(15)
+                if (cleaned.isBlank()) firstUserMessage.trim().take(15) else cleaned
+            } catch (e: Exception) {
+                firstUserMessage.trim().take(15)
             }
-            val cleaned = builder.toString()
-                .trim()
-                .lines()
-                .joinToString("")
-                .replace("\"", "")
-                .replace("「", "")
-                .replace("」", "")
-                .take(15)
-            if (cleaned.isBlank()) firstUserMessage.trim().take(15) else cleaned
-        } catch (e: Exception) {
-            firstUserMessage.trim().take(15)
+            runCatching { repository.renameConversation(conversationId, title) }
         }
-        runCatching { repository.renameConversation(conversationId, title) }
     }
 
     private suspend fun buildMultimodalPayload(
@@ -324,16 +329,14 @@ class StreamAiReplyUseCase @Inject constructor(
     }
 
     private companion object {
-        // Streaming persistence cadence. Lower = smoother perceived streaming
-        // (the UI mirrors these snapshots into the optimistic placeholder) at
-        // the cost of more single-row UPDATEs.
-        //
-        // Benchmarks (2026-07) show provider token gaps are typically 0-20ms
-        // once streaming starts, so a 180ms cadence still reads as "bursty".
-        // 80ms (~12 Hz) is smooth enough to look like continuous typing
-        // while keeping DB write load trivial — single-row PK UPDATEs are
-        // ~1-2ms each, so even at 12 Hz we burn <2% of one core.
-        const val SAVE_INTERVAL_MS = 80L
+        // Streaming persistence cadence. v4.0: lowered from 80ms (~12 Hz)
+        // to 150ms (~7 Hz). The previous 80ms cadence combined with three
+        // UPDATEs per tick (content + reasoning + status) was causing
+        // "bursty" token delivery on low-end devices because the SSE
+        // reader got back-pressured while Room wrote. 150ms is still
+        // smooth enough to read as continuous typing (the cursor animation
+        // bridges any visible gaps) while halving DB write load.
+        const val SAVE_INTERVAL_MS = 150L
         const val MAX_MULTIMODAL_HISTORY = 10
     }
 }

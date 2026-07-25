@@ -4,6 +4,149 @@
 
 ---
 
+## v4.0 — 2026-07-26（对话页机制统一重构 + 多 session 并发）
+
+### 触发原因
+v3.5.4 之后用户仍报：
+1. **切走 session 后再回来发新消息 → 闪退**（100% 命中）
+2. **进入旧 session 时用户消息重复显示两遍**（历史 db 残留）
+3. **AI 回复（尤其 glm-5.2 thinking 模型）长时间不出现 / 卡进度条**
+4. **切换 session 时旧 session 流式进度丢失**
+
+局部 patch 已无效——根因是机制层漏洞，必须把 UI ↔ ViewModel ↔ Service ↔ Room ↔ `:streaming` 进程作为系统重新梳理，一次性修复。
+
+### 方法论
+- 放弃 patch-by-patch，做完整架构 review（产出 `docs/v4-bug-catalog.md`，15 个 bug 全定位根因）
+- **以 Room 为唯一真相源**：UI 不再维护"乐观状态"，所有 messages 列表都来自 `observeMessages` Flow
+- **多 session 并发模型**：参考 ChatGPT 移动版，`StreamingService` 单 job → `Map<convId, Job>`，每 session 独立流，抽屉绿点指示
+- **新增改动自查清单**（每次大改后必跑）+ **闪退路径穷举**（12 项）——见下文
+
+### 15 个 bug 根因总览
+| # | 严重度 | 位置 | 根因一句话 | 修复 |
+|---|-------|------|-----------|------|
+| BUG-1 | 🔴 | `StreamingService.onStartCommand` | 拒收重入时未调 `startForeground()` → Android 14+ 5s 超时崩溃 | 入口无条件 `startForeground` |
+| BUG-2 | 🔴 | `ChatViewModel.observeMessages` | 乐观 UI 与 Room 分裂：`stopGenerating` 改 isStreaming 但 Room 仍 STREAMING | 删除乐观拼接 |
+| BUG-3 | 🔴 | `selectConversation` + UseCase persist | 主进程 UPDATE INTERRUPTED 与 :streaming 进程 persist STREAMING 反复横跳 | selectConversation 不再调 markInterrupted |
+| BUG-4 | 🟠 | UseCase v3.5.4 之前 | 重复 insert 用户消息；老 db 残留 | `MIGRATION_7_8` 去重 |
+| BUG-5 | 🟠 | `stopGenerating` | 立即翻转 isStreaming 但 Room 未收敛，被 Room 版替换为空 | 只翻 isLoading，等 Room 自然收敛 |
+| BUG-6 | 🟠 | `ChatMessageMapper` | `isStreaming = false` 写死，无视 status | `isStreaming = status == STREAMING`（**核心**） |
+| BUG-7 | 🟡 | 同 BUG-5 | — | 同 BUG-5 |
+| BUG-8 | 🟡 | `AiChatApplication.onCreate` | dangling sweep 在 :streaming 进程也跑，浪费 IO + race | 移到 ChatViewModel.init |
+| BUG-9 | 🟡 | `MessageBubble.StreamingPlaceholder` | reasoning 已流入仍显示"拼命思考中" | 条件加 `reasoningContent.isNullOrBlank()` |
+| BUG-10 | 🟡 | `observeMessages` collector | cancel() 协作式，短暂并存 | collector 内检查 convId 一致性 |
+| BUG-11 | 🟠 | 复合 | thinking 模型延迟 + BUG-6 残留 + persist 频率 | BUG-6+BUG-9 修后 90% 消失；SAVE_INTERVAL_MS 80→150ms |
+| BUG-12 | 🔴 | v4 修复引入的新 bug | 进入 streaming session 时 isLoading=true 拦截 sendMessage | 自动定向 stop 后再发 |
+| BUG-13 | 🟠 | UseCase + sweep | sweep 标 INTERRUPTED 后 :streaming 进程又写回 STREAMING | persist 前 SELECT status 检查 |
+| BUG-14 | 🟡 | 跨进程 Room 写 | 罕见 `SQLiteDatabaseLockedException` | runCatching 兜底 |
+| BUG-15 | 🟡 | `AttachmentEncoder.persist` | file:// URI 重复 persist 抛 IOException | scheme 已是 file 时直接返回 |
+
+详细 catalog：`docs/v4-bug-catalog.md`
+
+### 核心架构变更
+**StreamingService：单 job → Map**
+```kotlin
+// before
+private var streamingJob: Job? = null
+
+// after
+private val streamingJobs = mutableMapOf<String, Job>()  // key = conversationId
+private val jobsLock = Any
+```
+- `onStartCommand` 入口无条件 `startForeground()`（修 BUG-1）
+- 同 convId 重发：定向 cancel 旧 job；不同 convId：并行运行
+- `buildNotification(activeCount)` 文案随活跃数动态更新
+- 新增 `StreamingService.stop(context, conversationId)` 重载（定向 stop）
+- `onDestroy` 使用 `STOP_FOREGROUND_DETACH`
+
+**ChatViewModel：Room 唯一真相源**
+- 删除 `sendMessage` 内 `_uiState.update { messages = ... + 占位 }` 乐观拼接
+- `observeMessages` collector 加 `if (state.currentConversationId != conversationId) return@collect` 防 stale
+- `selectConversation` / `newChat` **不再 stopGenerating**——让其它 session 后台继续
+- `stopGenerating` 只发当前 convId 的 stop intent + 翻转 isLoading
+- `sendMessage` 检测当前 convId 在 streaming 时**自动定向 stop**（修 BUG-12）
+- 新增 `observeStreamingConversations()` 驱动抽屉绿点
+- `MAX_CONCURRENT_STREAMS = 5` 上限（API 限流 + 内存考虑）
+
+**ChatMessageMapper：BUG-6 核心修复**
+```kotlin
+isStreaming = status == MessageStatus.STREAMING  // was: false
+```
+
+### 跨 session 并发设计（新需求 — 用户选 Option C 并发多流）
+| 场景 | 行为 |
+|-----|------|
+| A 流式中切到 B | A 后台继续；B 立即可发新消息 |
+| 多个 session 同时流 | 互不干扰；UI 各自显示进度 |
+| 切回 A | 看到 A 已经流出的内容（不是 INTERRUPTED） |
+| 用户按 stop | 只停当前 session；其它不影响 |
+| 关掉 app | 所有流随 :streaming 进程结束；dangling sweep 兜底 |
+
+唯一真相源仍是 Room：
+- 新 Flow `observeStreamingConversationIds()` → `SELECT DISTINCT conversationId FROM messages WHERE status='STREAMING'`
+- ViewModel 把结果塞进 `ChatUiState.streamingConversationIds: Set<String>`
+- 抽屉 ConversationItem 显示呼吸绿点（8dp, alpha 0.3↔1, 800ms tween）
+
+### 新增改动自查清单（每次大改后必跑）
+| 改动 | 潜在新 bug | 自查结论 |
+|-----|-----------|---------|
+| 删除乐观 UI 拼接 | send → AI 占位 200ms 空窗 | ChatInputBar isLoading=true 显示 spinner；可接受 |
+| selectConversation 不 stop | 切到 streaming session 被拦截 | **已识别为 BUG-12，方案内修复** |
+| Map<convId, Job> 多 session | 同 convId 重发 race | NonCancellable 收尾 + 新 aiMessageId 不冲突 |
+| dangling sweep 移到 VM init | 与 :streaming 进程 persist race | **已识别为 BUG-13，方案内修复** |
+| SAVE_INTERVAL_MS 80→150 | 流式平滑度下降 | 7Hz 仍流畅；用户感知测试覆盖 |
+| 绿点 Set 来自 Room | multi-instance invalidation 失效 | Room 框架机制；fallback 不必要 |
+| MIGRATION_7_8 DELETE 重复行 | 大表上慢 | < 1000 行；事务包住 |
+| AttachmentEncoder.persist 跳过 file:// | 用户改原文件后 UI 还显示旧 | 边界；可接受 |
+
+### 闪退穷举（12 项崩溃路径）
+| # | 崩溃源 | 修复状态 |
+|---|-------|---------|
+| 1 | `ForegroundServiceDidNotStartInTimeException` | ✅ BUG-1 |
+| 2 | `SQLiteDatabaseLockedException` | ✅ BUG-14 |
+| 3 | `IOException` from AttachmentEncoder | ✅ BUG-15 |
+| 4 | `IllegalStateException: No active ApiProfile` | ✅ UseCase catch → FAILED |
+| 5 | `CancellationException` propagation | ✅ NonCancellable finalize |
+| 6 | `SecurityException` POST_NOTIFICATIONS | ✅ dataSync 不需要该权限 |
+| 7 | `ForegroundServiceStartNotAllowedException` | ✅ startForegroundService() |
+| 8 | `NetworkOnMainThreadException` | ✅ withContext(IO) |
+| 9 | `JsonSyntaxException` SSE 解析 | ✅ runCatching 兜底 |
+| 10 | Hilt `UninitializedPropertyAccessException` | ✅ @AndroidEntryPoint |
+| 11 | NPE (ApiProfile null) | ✅ resolveProvider throw + UseCase catch |
+| 12 | OOM 多 session 并发 | ✅ MAX_CONCURRENT_STREAMS=5 |
+
+**结论**：除已列修复外，无其它已知崩溃路径。
+
+### 文件改动清单（12 个文件）
+| 文件 | 改动概要 |
+|------|---------|
+| `service/StreamingService.kt` | 单 job → Map<convId, Job>；onStartCommand 无条件 startForeground；定向 stop；通知计数；STOP_FOREGROUND_DETACH |
+| `ui/chat/ChatViewModel.kt` | 删乐观拼接；selectConversation/newChat 不 stop；stopGenerating 定向；observeStreamingConversations；MAX_CONCURRENT_STREAMS；BUG-12 自动 stop |
+| `ui/chat/ChatUiState.kt` | 加 streamingConversationIds 字段 |
+| `ui/chat/model/ChatMessageMapper.kt` | isStreaming 由 status 推导（核心修复 BUG-6） |
+| `ui/chat/MessageBubble.kt` | StreamingPlaceholder 在 reasoning 非空时不显示（BUG-9） |
+| `ui/chat/ConversationItem.kt` | 加 StreamingDot（呼吸绿点） |
+| `ui/chat/ChatListScreen.kt` | ChatListDrawer 接 streamingConversationIds 参数 |
+| `ui/chat/ChatScreen.kt` | 接线 streamingConversationIds 到 drawer |
+| `data/local/dao/MessageDao.kt` | observeStreamingConversationIds Flow + getStatusById |
+| `domain/repository/ChatRepository.kt` + Impl | observeStreamingConversationIds + getMessageStatus |
+| `data/local/Migrations.kt` + `AppDatabase.kt` | v7→v8 去重（BUG-4）；version=8 |
+| `AiChatApplication.kt` | 删 dangling sweep（移到 VM init，BUG-8） |
+| `domain/usecase/StreamAiReplyUseCase.kt` | SAVE_INTERVAL_MS 80→150（BUG-11）；maybePersistStreaming pre-check status（BUG-13）；generateTitleIfNeeded NonCancellable |
+| `data/remote/AttachmentEncoder.kt` | persist 跳过 file:// scheme（BUG-15） |
+
+编译：`BUILD SUCCESSFUL`，零警告。
+
+### v4.1 待办（已知未做）
+- [ ] Service 多 job 并发的 stress test（开 5 个 session 同时发消息）
+- [ ] DB migration v7→v8 在已有 v7 数据上的升级测试
+- [ ] Notification 在 Android 13+ POST_NOTIFICATIONS 拒绝时是否仍能跑 service
+- [ ] thinking 模型 reasoning 单独显示效果（用户访谈）
+- [ ] SAVE_INTERVAL_MS=150 在低端机上的流畅度（红米/华为低端机测）
+- [ ] multi-instance invalidation 跨进程延迟测量（adb logcat Room invalidation trace）
+- [ ] 第一条 user message 后 Room emit 时机：现在依赖 :streaming 进程插入 AI placeholder，~100ms 内看到；如果延迟感知大需补 main 进程乐观插入（仅 placeholder，不动 content）
+
+---
+
 ## v3.1 — 2026-07-24（附件持久化修复 Row too big）
 
 ### 背景

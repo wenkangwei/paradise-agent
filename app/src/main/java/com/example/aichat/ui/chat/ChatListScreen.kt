@@ -44,6 +44,8 @@ fun ChatListDrawer(
     onSelectConversation: (String) -> Unit,
     onDeleteConversation: (String) -> Unit,
     onOpenSettings: () -> Unit = {},
+    /** ConversationIds currently being streamed — rendered as a green dot. */
+    streamingConversationIds: Set<String> = emptySet(),
     modifier: Modifier = Modifier
 ) {
     ModalDrawerSheet(modifier = modifier) {
@@ -133,7 +135,8 @@ fun ChatListDrawer(
                         conversation = conversation,
                         isSelected = conversation.id == currentConversationId,
                         onClick = { onSelectConversation(conversation.id) },
-                        onDelete = { onDeleteConversation(conversation.id) }
+                        onDelete = { onDeleteConversation(conversation.id) },
+                        isStreaming = conversation.id in streamingConversationIds
                     )
                 }
             }

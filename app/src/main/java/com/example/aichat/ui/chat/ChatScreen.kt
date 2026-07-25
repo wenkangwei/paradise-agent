@@ -183,7 +183,8 @@ fun ChatScreen(
                 onOpenSettings = {
                     scope.launch { drawerState.close() }
                     onNavigateToSettings()
-                }
+                },
+                streamingConversationIds = uiState.streamingConversationIds
             )
         }
     ) {

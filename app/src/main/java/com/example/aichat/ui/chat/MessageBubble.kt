@@ -170,8 +170,12 @@ fun MessageBubble(
                             }
                         }
 
-                        if (message.isStreaming && message.content.isBlank()) {
-                            // No content yet — animated thinking indicator
+                        if (message.isStreaming && message.content.isBlank() && message.reasoningContent.isNullOrBlank()) {
+                            // No content yet AND no reasoning — animated thinking indicator.
+                            // When reasoning_content is already streaming (thinking models
+                            // like glm-5.2, DeepSeek-R1), the ReasoningSection above is
+                            // already visible and showing progress; showing "拼命思考中"
+                            // below it would make the user think the request is stuck.
                             StreamingPlaceholder(color = chatColors.onAiBubbleColor)
                         } else if (message.isStreaming && message.content.isNotBlank()) {
                             Spacer(Modifier.height(2.dp))
