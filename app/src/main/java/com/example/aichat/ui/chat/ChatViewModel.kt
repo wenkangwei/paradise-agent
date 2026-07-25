@@ -2,6 +2,7 @@ package com.example.aichat.ui.chat
 
 import android.content.Context
 import android.net.Uri
+import android.os.PowerManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.aichat.data.provider.StreamEvent
@@ -25,6 +26,7 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -54,6 +56,17 @@ class ChatViewModel @Inject constructor(
 
     private var streamingJob: Job? = null
     private var messagesObserverJob: Job? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    /**
+     * Cap on how many recent history messages get their attachments re-encoded
+     * as base64 for a multimodal request. Encoding the entire history at once
+     * OOMs the app on long image conversations; this keeps the request bounded
+     * while still giving the model enough context.
+     */
+    private companion object {
+        const val MAX_MULTIMODAL_HISTORY = 10
+    }
 
     /** Catches unhandled exceptions in the streaming coroutine so a single
      *  malformed SSE chunk or state race doesn't kill the app. */
@@ -68,6 +81,11 @@ class ChatViewModel @Inject constructor(
     init {
         observeConversations()
         observeApiProfiles()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        releaseWakeLock()
     }
 
     private fun observeApiProfiles() {
@@ -131,6 +149,7 @@ class ChatViewModel @Inject constructor(
 
         streamingJob = viewModelScope.launch(exceptionHandler) {
             _uiState.update { it.copy(isLoading = true, error = null) }
+            acquireWakeLock()
 
             try {
                 val conversationId = _uiState.value.currentConversationId
@@ -205,21 +224,46 @@ class ChatViewModel @Inject constructor(
                 // null = unknown; true = Finish received; false = cancelled before Finish
                 var finishedNormally: Boolean? = null
 
+                // Persist the AI placeholder row up-front so a crash mid-stream
+                // still leaves a partial reply on disk. Updated incrementally
+                // every SAVE_INTERVAL_MS, then again on completion.
+                val aiPlaceholder = Message(
+                    id = aiMessageId,
+                    conversationId = conversationId,
+                    role = Role.ASSISTANT,
+                    content = "",
+                    timestamp = System.currentTimeMillis(),
+                    status = MessageStatus.STREAMING
+                )
+                withContext(NonCancellable) {
+                    runCatching { repository.appendMessage(aiPlaceholder) }
+                }
+                var lastSaveMs = System.currentTimeMillis()
+                val saveIntervalMs = 500L
+
+                suspend fun maybePersistStreaming() {
+                    if (System.currentTimeMillis() - lastSaveMs < saveIntervalMs) return
+                    lastSaveMs = System.currentTimeMillis()
+                    val snapContent = contentBuilder.toString()
+                    val snapReasoning = reasoningBuilder.toString().ifBlank { null }
+                    runCatching {
+                        withContext(NonCancellable) {
+                            repository.updateStreamingMessage(
+                                id = aiMessageId,
+                                content = snapContent,
+                                reasoningContent = snapReasoning,
+                                status = MessageStatus.STREAMING.name
+                            )
+                        }
+                    }
+                }
+
                 try {
                     val stream = if (hasAnyAttachments) {
                         // Convert file paths to base64 data URLs ONLY for the HTTP
                         // request body. This is ephemeral — the base64 string lives
                         // only in memory and is never persisted to Room.
-                        val multimodalMessages = fullHistory.map { msg ->
-                            val remoteAttachments = msg.attachments.map { domainAtt ->
-                                val dataUrl = AttachmentEncoder.toDataUrl(domainAtt.uri)
-                                com.example.aichat.data.remote.Attachment(
-                                    url = dataUrl,
-                                    mimeType = domainAtt.mimeType
-                                )
-                            }
-                            msg to remoteAttachments
-                        }
+                        val multimodalMessages = buildMultimodalPayload(fullHistory)
                         remoteDataSource.streamChatMultimodal(multimodalMessages)
                     } else {
                         remoteDataSource.streamChat(fullHistory)
@@ -234,6 +278,7 @@ class ChatViewModel @Inject constructor(
                                     contentBuilder.toString(),
                                     reasoningBuilder.toString()
                                 )
+                                maybePersistStreaming()
                             }
                             is StreamEvent.ReasoningDelta -> {
                                 reasoningBuilder.append(event.text)
@@ -242,6 +287,7 @@ class ChatViewModel @Inject constructor(
                                     contentBuilder.toString(),
                                     reasoningBuilder.toString()
                                 )
+                                maybePersistStreaming()
                             }
                             is StreamEvent.Finish -> {
                                 finishedNormally = true
@@ -267,20 +313,33 @@ class ChatViewModel @Inject constructor(
                     null -> MessageStatus.COMPLETE // stream closed without explicit Finish
                 }
                 if (finalContent.isNotBlank() || finalReasoning != null) {
-                    val aiMessage = Message(
-                        id = aiMessageId,
-                        conversationId = conversationId,
-                        role = Role.ASSISTANT,
-                        content = finalContent,
-                        timestamp = System.currentTimeMillis(),
-                        status = status,
-                        reasoningContent = finalReasoning,
-                        metadata = if (status == MessageStatus.INTERRUPTED) {
-                            MessageMetadata(interruptedReason = "user_cancelled")
-                        } else null
-                    )
                     withContext(NonCancellable) {
-                        repository.appendMessage(aiMessage)
+                        runCatching {
+                            repository.updateStreamingMessage(
+                                id = aiMessageId,
+                                content = finalContent,
+                                reasoningContent = finalReasoning,
+                                status = status.name
+                            )
+                            if (status == MessageStatus.INTERRUPTED) {
+                                repository.updateMessageMetadata(
+                                    aiMessageId,
+                                    MessageMetadata(interruptedReason = "user_cancelled")
+                                )
+                            }
+                            // Refresh conversation's lastMessage + updatedAt so
+                            // the drawer shows the latest preview.
+                            repository.touchConversation(
+                                conversationId,
+                                finalContent.take(100),
+                                System.currentTimeMillis()
+                            )
+                        }
+                    }
+                } else {
+                    // Empty reply - remove the placeholder so it doesn't linger.
+                    withContext(NonCancellable) {
+                        runCatching { repository.deleteMessage(aiMessageId) }
                     }
                 }
 
@@ -311,8 +370,30 @@ class ChatViewModel @Inject constructor(
                 handleError(e.message ?: "Unexpected error", text, sendAttachments, retryable = false)
             } finally {
                 _uiState.update { it.copy(isLoading = false) }
+                releaseWakeLock()
             }
         }
+    }
+
+    /**
+     * Hold a partial WakeLock while streaming so the CPU stays awake when the
+     * screen turns off. Without this, Android Doze defers/suspends network
+     * activity and the SSE connection silently dies, taking the partial AI
+     * reply with it.
+     */
+    private fun acquireWakeLock() {
+        runCatching {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "aichat::streaming:${System.currentTimeMillis()}"
+            ).apply { acquire(10 * 60 * 1000L) } // 10 min hard cap as a safety net
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { runCatching { if (it.isHeld) it.release() } }
+        wakeLock = null
     }
 
     private suspend fun handleError(
@@ -377,6 +458,7 @@ class ChatViewModel @Inject constructor(
     fun stopGenerating() {
         streamingJob?.cancel()
         _uiState.update { it.copy(isLoading = false) }
+        releaseWakeLock()
     }
 
     fun newChat() {
@@ -443,6 +525,34 @@ class ChatViewModel @Inject constructor(
         }
         viewModelScope.launch {
             runCatching { repository.setMessageReaction(messageId, newValue) }
+        }
+    }
+
+    /**
+     * Builds the multimodal payload for the LLM API.
+     *
+     * Memory: every attachment is base64-encoded into a single big string.
+     * Encoding ALL history attachments at once used to OOM the app on 3+ image
+     * conversations (each 5 MB image -> ~7 MB base64 -> multiplied across N
+     * messages -> >100 MB string heap). We cap to the most recent
+     * [MAX_MULTIMODAL_HISTORY] messages so memory stays bounded; older
+     * context is dropped (acceptable - LLMs already lose long-context
+     * fidelity well before this limit).
+     */
+    private suspend fun buildMultimodalPayload(
+        fullHistory: List<Message>
+    ): List<Pair<Message, List<com.example.aichat.data.remote.Attachment>>> {
+        val recent = fullHistory.takeLast(MAX_MULTIMODAL_HISTORY)
+        return recent.map { msg ->
+            val remoteAttachments = if (msg.attachments.isEmpty()) emptyList()
+            else msg.attachments.map { domainAtt ->
+                val dataUrl = AttachmentEncoder.toDataUrl(domainAtt.uri)
+                com.example.aichat.data.remote.Attachment(
+                    url = dataUrl,
+                    mimeType = domainAtt.mimeType
+                )
+            }
+            msg to remoteAttachments
         }
     }
 

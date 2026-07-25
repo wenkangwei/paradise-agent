@@ -8,7 +8,9 @@ import com.example.aichat.data.local.mapper.toEntity
 import com.example.aichat.di.IoDispatcher
 import com.example.aichat.domain.model.Conversation
 import com.example.aichat.domain.model.Message
+import com.example.aichat.domain.model.MessageMetadata
 import com.example.aichat.domain.repository.ChatRepository
+import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -21,6 +23,8 @@ class ChatRepositoryImpl @Inject constructor(
     private val messageDao: MessageDao,
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher
 ) : ChatRepository {
+
+    private val gson = Gson()
 
     override fun observeConversations(): Flow<List<Conversation>> =
         conversationDao.observeAll().map { list -> list.map { it.toDomain() } }
@@ -66,6 +70,46 @@ class ChatRepositoryImpl @Inject constructor(
     override suspend fun updateMessage(id: String, content: String) = withContext(ioDispatcher) {
         messageDao.updateContent(id, content)
     }
+
+    override suspend fun updateStreamingMessage(
+        id: String,
+        content: String,
+        reasoningContent: String?,
+        status: String
+    ) = withContext(ioDispatcher) {
+        // Two separate UPDATEs - the DAO doesn't expose a combined setter.
+        // Both are O(1) single-row updates by primary key; cheap even at
+        // 500ms cadence over a long stream.
+        messageDao.updateContent(id, content)
+        if (reasoningContent != null) {
+            messageDao.updateReasoning(id, reasoningContent)
+        }
+        messageDao.updateStatus(id, status)
+    }
+
+    override suspend fun updateMessageMetadata(id: String, metadata: MessageMetadata) =
+        withContext(ioDispatcher) {
+            messageDao.updateStatusAndMetadata(
+                id = id,
+                status = messageDao.getStatusById(id) ?: "COMPLETE",
+                metadata = gson.toJson(metadata)
+            )
+        }
+
+    override suspend fun deleteMessage(id: String) = withContext(ioDispatcher) {
+        messageDao.deleteById(id)
+    }
+
+    override suspend fun touchConversation(id: String, lastMessage: String, timestamp: Long) =
+        withContext(ioDispatcher) {
+            val existing = conversationDao.getById(id) ?: return@withContext
+            conversationDao.updateMeta(
+                id = id,
+                title = existing.title,
+                lastMessage = lastMessage,
+                time = timestamp
+            )
+        }
 
     override suspend fun renameConversation(id: String, title: String) = withContext(ioDispatcher) {
         conversationDao.rename(id, title)

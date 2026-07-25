@@ -7,6 +7,11 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Keep CPU awake during streaming so Doze doesn't kill the SSE connection -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Let the user disable battery optimisation for the app so background
+         streaming survives screen-off on aggressive OEM ROMs (Xiaomi/Huawei). -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />

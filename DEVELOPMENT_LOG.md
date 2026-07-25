@@ -162,6 +162,76 @@ USER: <用户首条消息原文>
 
 ---
 
+## v3.3 — 2026-07-25（稳定性：闪退/后台/数据丢失）
+
+### 背景
+装机实测暴露出三类稳定问题：
+1. **AI 写 HTML/代码时闪退**、**上传多个附件后闪退**
+2. **关闭手机屏幕后，流式请求被系统中断**，AI 正在输出的内容消失
+3. **app 闪退/被杀后，本次 AI 已生成的内容全部丢失**，Room 里只剩用户消息
+
+### 根因分析
+
+| # | 问题 | 根因 |
+|---|---|---|
+| 1a | HTML 代码闪退 | `MarkdownText.parseBlocks` 在流式过程中每来一个新 token 都全量重扫整段文本；HTML 通常带大段 ```` ```html ... ```` 代码块，parser 在代码围栏里逐行扫描，遇到嵌套/异常 fence 时可能死循环或 OOM。每个 `CodeBlock` 还单独 `rememberScrollState()`，流式代码块多时 State 对象堆积 |
+| 1b | 多附件闪退 | `ChatViewModel` 发送多模态请求前，把**整个对话历史**的每个附件都先 `AttachmentEncoder.toDataUrl()` 转成 base64，全部同时驻留内存。3 张 5MB 图 ≈ 20MB base64 × 历史轮数 + OkHttp 请求体再复制一份 → 大几十 MB 字符串堆，直接 OOM |
+| 2 | 息屏中断 | Android Doze 模式下系统会切断网络长连接；app 没有 `WAKE_LOCK`、没有前台 Service、没有电池优化白名单 |
+| 3 | 闪退丢内容 | 流式期间 AI 内容只存在 `StringBuilder` 和 `_uiState.messages` 内存里，**只有在 stream 完成后的 `finally` 才一次性 `appendMessage` 落库**。进程被杀 = 内存丢 = Room 里没有 AI 回复 |
+
+### 修复
+
+#### 1a — Markdown 解析器加固
+- `MarkdownText` 给 `parseBlocks` 包 `runCatching { ... }`，任何异常都 fallback 到 `MdBlock.Paragraph(text)`，至少用户能看到原始文本
+- `parseBlocks` 加 `safety` 迭代上限（`lines.size * 4 + 16`），防止死循环
+- 代码块收集加 200KB 上限，超长的 LLM 输出只取前 200KB
+- 删除 `CodeBlock` 里 `verticalScroll(rememberScrollState())`，避免每个代码块都建 ScrollState；让外层 `LazyColumn` 统一滚动
+
+#### 1b — 多附件 OOM 缓解
+- 把多模态编码拆成 `buildMultimodalPayload()`，只取最近 `MAX_MULTIMODAL_HISTORY = 10` 条历史消息转 base64
+- 旧消息里的附件不再重复编码，内存占用被硬上限锁住
+
+#### 2 — 息屏保活
+- `AndroidManifest.xml` 加 `WAKE_LOCK` 和 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 权限
+- `ChatViewModel` 流式开始时 `acquireWakeLock()`（`PARTIAL_WAKE_LOCK`，10 分钟硬上限），结束时 `releaseWakeLock()`
+- `ChatScreen` 流式期间用 `FLAG_KEEP_SCREEN_ON` 保持屏幕常亮
+- 首次进入流式状态时，如果应用未加入电池优化白名单，snackbar 提示"建议关闭电池优化"，点击跳系统设置
+
+#### 3 — 流式增量落库
+- 流式开始时先 `appendMessage` 一条 `status = STREAMING` 的占位 AI 行
+- 每 500ms 把当前 `content + reasoning + status` 通过 `repository.updateStreamingMessage()` 写库（轻量 UPDATE，不动 conversations 表）
+- 流结束时把占位行更新为 `COMPLETE` / `INTERRUPTED`，并刷新 conversation 的 `lastMessage` / `updatedAt`
+- 如果最终 AI 没有内容，删除占位行
+
+### DB / Repository 变更
+- `MessageDao` 新增 `getStatusById(id)`、`deleteById(id)`
+- `ChatRepository` 接口新增：
+  - `updateStreamingMessage(id, content, reasoning, status)`
+  - `updateMessageMetadata(id, metadata)`
+  - `deleteMessage(id)`
+  - `touchConversation(id, lastMessage, timestamp)`
+
+**不需要 schema 升级**——只有接口/DAO 新方法，没有新列。
+
+### 文件变更
+- `AndroidManifest.xml`
+- `ui/chat/ChatViewModel.kt`
+- `ui/chat/ChatScreen.kt`
+- `ui/chat/MarkdownText.kt`
+- `data/repository/ChatRepositoryImpl.kt`
+- `data/repository/ChatRepository.kt`
+- `data/local/dao/MessageDao.kt`
+- `DEVELOPMENT_LOG.md`
+
+### 经验小结
+1. **流式 AI 必须增量落库**——否则一次进程杀/闪退就把用户等了几秒的内容全清空，体验不可接受
+2. **base64 多模态是内存炸弹**——绝不能把整个对话历史的附件全部同时编码，要么限制历史长度，要么做流式 parts 上传
+3. **手写 markdown parser 必须设防**——LLM 输出不可控，再简单的 parser 也要加迭代上限 + fallback
+4. **Android 息屏杀后台是系统行为**——不要指望默认状态能保住 SSE 长连接；`WAKE_LOCK` + 电池优化白名单 + `FLAG_KEEP_SCREEN_ON` 三件套是标配
+5. **WakeLock 要带硬超时**——这里用 10 分钟，防止协程泄漏导致一直持锁
+
+---
+
 ## v3 — 2026-07-24（语音/Markdown/悬浮栏/统一网关）
 
 ### 背景

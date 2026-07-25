@@ -69,7 +69,15 @@ fun MarkdownText(
     style: TextStyle = MaterialTheme.typography.bodyMedium
 ) {
     val chatColors = MaterialTheme.chatColors
-    val blocks = remember(text) { parseBlocks(text) }
+    // Parse defensively. A malformed code fence or huge nested structure
+    // during streaming used to crash the parser; we fall back to a single
+    // raw paragraph block so the user still sees the partial output instead
+    // of a blank bubble.
+    val blocks = remember(text) {
+        runCatching { parseBlocks(text) }.getOrElse {
+            listOf(MdBlock.Paragraph(text))
+        }
+    }
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -96,8 +104,12 @@ private fun parseBlocks(src: String): List<MdBlock> {
     val out = mutableListOf<MdBlock>()
     val lines = src.replace("\r\n", "\n").split("\n")
     var i = 0
+    // Safety: hard cap on iterations so a pathological input can't loop
+    // forever. Each loop iteration consumes at least one line, so this is
+    // generous; if we ever hit it we just flush what we have.
+    var safety = lines.size * 4 + 16
 
-    while (i < lines.size) {
+    while (i < lines.size && safety-- > 0) {
         val line = lines[i]
 
         // Skip blank lines between blocks
@@ -109,8 +121,13 @@ private fun parseBlocks(src: String): List<MdBlock> {
             val lang = fenceMatch.groupValues[1].trim().takeIf { it.isNotEmpty() }
             val sb = StringBuilder()
             i++
+            // Cap collected code at 200 KB so a runaway LLM output can't
+            // drag the parser / render tree to a halt.
+            val maxCodeBytes = 200_000
             while (i < lines.size && !lines[i].trimStart().startsWith("```")) {
-                sb.append(lines[i]).append('\n')
+                if (sb.length < maxCodeBytes) {
+                    sb.append(lines[i]).append('\n')
+                }
                 i++
             }
             if (i < lines.size) i++ // consume closing fence
@@ -312,7 +329,11 @@ private fun CodeBlock(
             text = code,
             modifier = Modifier
                 .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
+                // NOTE: no per-block verticalScroll - each scrollable code
+                // block allocates its own ScrollState, and a long streaming
+                // conversation with many code blocks would leak them. Let the
+                // outer chat LazyColumn handle scrolling; long blocks just
+                // take vertical space.
                 .padding(12.dp),
             style = baseStyle.copy(
                 fontFamily = FontFamily.Monospace,

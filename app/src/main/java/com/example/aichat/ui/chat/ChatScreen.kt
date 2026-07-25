@@ -55,8 +55,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,6 +80,21 @@ fun ChatScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
+
+    // Keep the screen on while a stream is in progress so the user can watch
+    // the reply render without the device sleeping and tearing down the
+    // connection. The ViewModel holds a PARTIAL_WAKE_LOCK for CPU; this
+    // handles the display.
+    DisposableEffect(uiState.isStreaming) {
+        val window = (context as? android.app.Activity)?.window
+        if (uiState.isStreaming) {
+            window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
 
     // Auto-scroll to bottom when new messages arrive or streaming content updates
     LaunchedEffect(uiState.messages.lastOrNull()?.content, uiState.messages.size) {
@@ -96,6 +113,29 @@ fun ChatScreen(
     }
     val showScrollUp by remember {
         derivedStateOf { listState.firstVisibleItemIndex > 0 }
+    }
+
+    // If the user is about to wait for a streaming reply, remind them once
+    // that keeping the app alive while the screen is off works best when the
+    // app is excluded from battery optimisations.
+    LaunchedEffect(uiState.isStreaming) {
+        if (uiState.isStreaming) {
+            val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(context.packageName)) {
+                snackbarHostState.showSnackbar(
+                    message = "建议关闭电池优化，息屏后台更稳定",
+                    actionLabel = "去设置",
+                    withDismissAction = true
+                ).let { result ->
+                    if (result == SnackbarResult.ActionPerformed) {
+                        val intent = android.content.Intent(
+                            android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+                        )
+                        runCatching { context.startActivity(intent) }
+                    }
+                }
+            }
+        }
     }
 
     // Handle one-time events
