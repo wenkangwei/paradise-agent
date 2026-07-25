@@ -88,15 +88,58 @@ object ZhipuGlmSupplier : Supplier {
     override val displayName = "智谱 GLM (bigmodel)"
     override val category = SupplierCategory.OPENAI_COMPATIBLE
     override val defaultBaseUrl = "https://open.bigmodel.cn/api/paas/v4/"
+    // Ordered by measured latency (2026-07 streaming benchmark):
+    //   glm-4-flash       TTFT 0.6s  37 chunks/s   ← fastest free model
+    //   glm-4.5-flash     TTFT 8.4s  49 chunks/s   (cold-start heavy)
+    //   glm-4-plus        paid, comparable TTFT to glm-4.5
     override val suggestedModels = listOf(
-        "glm-4-plus",
-        "glm-4-air",
-        "glm-4-airx",
-        "glm-4-long",
         "glm-4-flash",
         "glm-4-flashx",
+        "glm-4-air",
+        "glm-4-airx",
+        "glm-4-plus",
+        "glm-4-long",
+        "glm-4.5",
+        "glm-4.5-flash",
         "glm-4-0520",
         "glm-4"
+    )
+    override val apiKeyRequired = true
+    override val brandColor = 0xFF3366FF
+    override val capabilities = setOf(Capability.STREAMING, Capability.MULTIMODAL, Capability.TOOL_CALLING, Capability.REASONING)
+}
+
+/**
+ * 智谱 GLM Coding Plan — separate endpoint from the free-tier [ZhipuGlmSupplier].
+ *
+ * Coding Plan subscribers must use `/api/coding/paas/v4/` (NOT the public
+ * `/api/paas/v4/`); calling the public endpoint with a Coding-Plan-only
+ * model (e.g. glm-5.2) returns HTTP 429 "余额不足" even though the plan is
+ * active. The two endpoints are billed and gated independently.
+ *
+ * Verified models (2026-07, plan tier-dependent):
+ *   glm-5.2 / glm-5.1 / glm-5 / glm-5-turbo
+ *   glm-4.7 / glm-4.6 / glm-4.5 / glm-4.5-air
+ *
+ * NOTE: all of these are *thinking* models — they stream a long
+ * `reasoning_content` trace first (10-20s) before emitting visible
+ * `content`. The app's ReasoningSection surfaces this; the main bubble
+ * spinner stays on until content starts.
+ */
+object ZhipuGlmCodingPlanSupplier : Supplier {
+    override val id = "zhipu_glm_coding_plan"
+    override val displayName = "智谱 GLM Coding Plan"
+    override val category = SupplierCategory.OPENAI_COMPATIBLE
+    override val defaultBaseUrl = "https://open.bigmodel.cn/api/coding/paas/v4/"
+    override val suggestedModels = listOf(
+        "glm-5.2",
+        "glm-5.1",
+        "glm-5",
+        "glm-5-turbo",
+        "glm-4.7",
+        "glm-4.6",
+        "glm-4.5",
+        "glm-4.5-air"
     )
     override val apiKeyRequired = true
     override val brandColor = 0xFF3366FF
@@ -132,11 +175,20 @@ object KimiSupplier : Supplier {
     override val displayName = "Moonshot Kimi (月之暗面)"
     override val category = SupplierCategory.OPENAI_COMPATIBLE
     override val defaultBaseUrl = "https://api.moonshot.cn/v1/"
+    // Ordered by measured latency (2026-07 streaming benchmark):
+    //   kimi-k2.7-code-highspeed  TTFT 2.3s  528 chunks/s   ← best UX
+    //   kimi-k2.7-code            TTFT 6.5s   52 chunks/s
+    //   kimi-k2.5                 TTFT 7.6s   64 chunks/s
+    //   kimi-k3                   TTFT 10.7s  43 chunks/s   (reasoning)
+    //   moonshot-v1-*             legacy, ~1s TTFT but weaker model
     override val suggestedModels = listOf(
+        "kimi-k2.7-code-highspeed",
+        "kimi-k2.7-code",
+        "kimi-k2.5",
+        "kimi-k3",
         "moonshot-v1-8k",
         "moonshot-v1-32k",
-        "moonshot-v1-128k",
-        "kimi-latest"
+        "moonshot-v1-128k"
     )
     override val apiKeyRequired = true
     override val brandColor = 0xFF1F1F1F
@@ -310,6 +362,7 @@ object BuiltinSuppliers {
         DefaultServerSupplier,
         MyGatewaySupplier,
         ZhipuGlmSupplier,
+        ZhipuGlmCodingPlanSupplier,
         QwenSupplier,
         KimiSupplier,
         DoubaoSupplier,

@@ -102,9 +102,32 @@ class ChatViewModel @Inject constructor(
                 val hasStreaming = messages.any { it.status == MessageStatus.STREAMING }
                 _uiState.update { state ->
                     if (state.isStreaming && hasStreaming) {
-                        // The service is still running; let the optimistic
-                        // streaming UI keep driving to avoid cursor jumps.
-                        state
+                        // The :streaming process writes the partial reply to
+                        // Room every SAVE_INTERVAL_MS; mirror that snapshot
+                        // into the optimistic placeholder so the user actually
+                        // sees tokens stream in (rather than an empty bubble
+                        // + spinner for the whole stream duration).
+                        //
+                        // We keep the optimistic ChatMessage instance so its
+                        // position in the list (and scroll state) is stable;
+                        // only content/reasoning get refreshed. The ID match
+                        // is guaranteed because sendMessage propagates the
+                        // optimistic aiMessageId through to the service.
+                        val snapshot = messages.firstOrNull { it.status == MessageStatus.STREAMING }
+                        if (snapshot != null) {
+                            state.copy(
+                                messages = state.messages.map { msg ->
+                                    if (msg.id == snapshot.id && msg.isStreaming) {
+                                        msg.copy(
+                                            content = snapshot.content,
+                                            reasoningContent = snapshot.reasoningContent
+                                        )
+                                    } else msg
+                                }
+                            )
+                        } else {
+                            state
+                        }
                     } else {
                         state.copy(
                             messages = messages.toChatMessages(),
