@@ -23,6 +23,12 @@ data class ApiProfileEntity(
     val modelName: String,
     val isDefault: Boolean = false,
     val customFieldsJson: String = "{}",
+    /**
+     * When true, [baseUrl] is treated as the *complete* chat-completions
+     * endpoint and the provider must NOT append `/chat/completions`. Used
+     * for exotic gateways whose endpoint path is not OpenAI-shaped.
+     */
+    val fullUrlMode: Boolean = false,
     val createdAt: Long,
     val updatedAt: Long
 )

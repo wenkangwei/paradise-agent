@@ -27,6 +27,11 @@ data class ApiProfile(
     val modelName: String,
     val isDefault: Boolean,
     val hasApiKey: Boolean,
+    /**
+     * When true, [baseUrl] is the complete chat-completions endpoint and the
+     * request layer must not append `/chat/completions`.
+     */
+    val fullUrlMode: Boolean = false,
     val createdAt: Long,
     val updatedAt: Long
 )
@@ -61,7 +66,8 @@ interface ApiProfileRepository {
         baseUrl: String,
         apiKey: String,
         modelName: String,
-        makeDefault: Boolean = false
+        makeDefault: Boolean = false,
+        fullUrlMode: Boolean = false
     ): String
 
     suspend fun delete(id: String)
@@ -116,7 +122,8 @@ class ApiProfileRepositoryImpl @Inject constructor(
         baseUrl: String,
         apiKey: String,
         modelName: String,
-        makeDefault: Boolean
+        makeDefault: Boolean,
+        fullUrlMode: Boolean
     ): String = withContext(ioDispatcher) {
         val now = System.currentTimeMillis()
         val effectiveId = id ?: UUID.randomUUID().toString()
@@ -144,6 +151,10 @@ class ApiProfileRepositoryImpl @Inject constructor(
             modelName = resolvedModel,
             isDefault = existing?.isDefault ?: isFirst || makeDefault,
             customFieldsJson = "{}",
+            // Preserve existing fullUrlMode on updates when caller didn't
+            // explicitly toggle it (callers always pass the form value, but
+            // bootstrap paths use the default).
+            fullUrlMode = fullUrlMode,
             createdAt = existing?.createdAt ?: now,
             updatedAt = now
         )
@@ -190,6 +201,7 @@ class ApiProfileRepositoryImpl @Inject constructor(
         modelName = modelName,
         isDefault = isDefault,
         hasApiKey = apiKeyEncrypted.isNotEmpty(),
+        fullUrlMode = fullUrlMode,
         createdAt = createdAt,
         updatedAt = updatedAt
     )

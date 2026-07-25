@@ -37,6 +37,12 @@ data class ApiConfigEditUiState(
     val baseUrl: String = "",
     val apiKey: String = "",
     val modelName: String = "",
+    /**
+     * When true, [baseUrl] is the complete chat-completions endpoint and the
+     * provider must not append `/chat/completions`. Off by default — every
+     * built-in supplier ships a versioned baseUrl that needs the suffix.
+     */
+    val fullUrlMode: Boolean = false,
     val suppliers: List<Supplier> = emptyList(),
     val apiKeyHistory: List<String> = emptyList(),
     val baseUrlHistory: List<String> = emptyList(),
@@ -99,6 +105,7 @@ class ApiConfigViewModel @Inject constructor(
                 baseUrl = profile.baseUrl,
                 apiKey = "",
                 modelName = profile.modelName,
+                fullUrlMode = profile.fullUrlMode,
                 suppliers = suppliers,
                 apiKeyHistory = history,
                 baseUrlHistory = urlHistory
@@ -129,6 +136,8 @@ class ApiConfigViewModel @Inject constructor(
     fun updateBaseUrl(v: String) = _editState.update { it.copy(baseUrl = v, saved = false) }
     fun updateApiKey(v: String) = _editState.update { it.copy(apiKey = v, saved = false) }
     fun updateModel(v: String) = _editState.update { it.copy(modelName = v, saved = false) }
+    fun updateFullUrlMode(v: Boolean) =
+        _editState.update { it.copy(fullUrlMode = v, saved = false) }
     fun clearSaved() = _editState.update { it.copy(saved = false) }
     fun clearError() = _editState.update { it.copy(error = null) }
 
@@ -148,7 +157,8 @@ class ApiConfigViewModel @Inject constructor(
                     baseUrl = s.baseUrl.trim(),
                     apiKey = s.apiKey,
                     modelName = s.modelName.trim(),
-                    makeDefault = makeDefault
+                    makeDefault = makeDefault,
+                    fullUrlMode = s.fullUrlMode
                 )
             }.onSuccess {
                 _editState.update { it.copy(saved = true) }

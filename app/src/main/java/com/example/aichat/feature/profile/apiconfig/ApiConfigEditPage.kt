@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -25,6 +26,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -110,11 +112,46 @@ fun ApiConfigEditPage(
                 value = state.baseUrl,
                 onValueChange = viewModel::updateBaseUrl,
                 label = "Base URL",
-                placeholder = "https://api.example.com/v1/",
+                placeholder = if (state.fullUrlMode) {
+                    "https://api.example.com/v1/chat/completions"
+                } else {
+                    "https://api.example.com/v1/"
+                },
                 history = state.baseUrlHistory,
                 keyboardType = KeyboardType.Uri,
                 mask = false
             )
+
+            // Toggle: is baseUrl the complete endpoint?
+            // On  → baseUrl is used verbatim, no suffix appended (exotic gateways,
+            //      custom OpenAI-compatible routers with non-standard paths).
+            // Off → the provider appends `chat/completions` (default for every
+            //      built-in supplier).
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Switch(
+                    checked = state.fullUrlMode,
+                    onCheckedChange = viewModel::updateFullUrlMode
+                )
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(
+                        text = "完整 URL（不拼接后缀）",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = if (state.fullUrlMode) {
+                            "当前：直接以 Base URL 发请求"
+                        } else {
+                            "当前：Base URL + /chat/completions"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
 
             // API Key with history dropdown (masked)
             HistoryTextField(

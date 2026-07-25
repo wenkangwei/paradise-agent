@@ -104,6 +104,7 @@ class ChatRemoteDataSource @Inject constructor(
             modelName = profile.modelName,
             isDefault = true,
             customFieldsJson = "{}",
+            fullUrlMode = profile.fullUrlMode,
             createdAt = profile.createdAt,
             updatedAt = profile.updatedAt
         )

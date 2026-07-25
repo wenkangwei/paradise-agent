@@ -6,11 +6,24 @@ import retrofit2.http.Body
 import retrofit2.http.Headers
 import retrofit2.http.POST
 import retrofit2.http.Streaming
+import retrofit2.http.Url
 
 interface AiApiService {
 
+    /**
+     * Streams a chat completion. The endpoint is supplied by the caller via
+     * [url] so that profiles in `fullUrlMode` (where baseUrl is already the
+     * complete chat-completions URL) and legacy profiles (where baseUrl only
+     * carries the version segment and `/chat/completions` must be appended)
+     * can share the same service interface.
+     *
+     * - Legacy mode: callers pass the relative path `chat/completions`,
+     *   resolved against the Retrofit baseUrl.
+     * - Full-URL mode: callers pass an absolute URL (`http(s)://...`); the
+     *   Retrofit baseUrl is ignored for that call.
+     */
     @Streaming
     @Headers("Accept: text/event-stream")
-    @POST("chat/completions")
-    suspend fun streamChat(@Body request: ChatRequestDto): ResponseBody
+    @POST
+    suspend fun streamChat(@Url url: String, @Body request: ChatRequestDto): ResponseBody
 }

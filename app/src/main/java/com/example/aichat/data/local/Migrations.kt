@@ -89,5 +89,20 @@ val MIGRATION_5_6 = object : Migration(5, 6) {
     }
 }
 
-/** All migrations from the initial v2 schema to the current v6. */
-val ALL_MIGRATIONS = arrayOf(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+/**
+ * v6 → v7: Add `fullUrlMode` column to api_profiles.
+ *
+ * When true, the stored baseUrl is treated as the *complete* chat-completions
+ * endpoint and the request layer skips appending `/chat/completions`. Existing
+ * rows default to false (legacy behaviour) so this is a non-breaking change.
+ */
+val MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE api_profiles ADD COLUMN fullUrlMode INTEGER NOT NULL DEFAULT 0"
+        )
+    }
+}
+
+/** All migrations from the initial v2 schema to the current v7. */
+val ALL_MIGRATIONS = arrayOf(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)

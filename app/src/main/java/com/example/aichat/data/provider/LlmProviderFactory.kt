@@ -102,7 +102,7 @@ private class OpenAiCompatibleProvider(
         )
 
         val responseBody = try {
-            apiService.streamChat(request)
+            apiService.streamChat(endpointPath, request)
         } catch (e: HttpException) {
             throw com.example.aichat.data.remote.ApiException(
                 "API error: HTTP ${e.code()} - ${e.message()}", e
@@ -116,8 +116,31 @@ private class OpenAiCompatibleProvider(
         streamClient.toEventFlow(responseBody).collect { emit(it) }
     }.flowOn(Dispatchers.IO)
 
+    /**
+     * The `@Url` argument passed to [AiApiService.streamChat].
+     *
+     * - Legacy mode (fullUrlMode = false): relative path `chat/completions`
+     *   resolved against the Retrofit baseUrl (which is the profile's
+     *   versioned baseUrl with a trailing slash). Preserves the previous
+     *   behaviour for every built-in supplier.
+     * - Full-URL mode (fullUrlMode = true): the profile's baseUrl verbatim,
+     *   treated as an absolute URL by Retrofit so the configured baseUrl is
+     *   bypassed entirely.
+     */
+    private val endpointPath: String
+        get() = if (profile.fullUrlMode) profile.baseUrl else "chat/completions"
+
     private fun buildStack(): AiApiService {
-        val baseUrl = profile.baseUrl.let { if (it.endsWith("/")) it else "$it/" }
+        // In fullUrlMode the absolute URL is supplied per-call via @Url, so
+        // the Retrofit baseUrl only needs to be a syntactically valid placeholder
+        // — derive it from the URL's origin to keep TLS/DNS warm for the right
+        // host. In legacy mode the baseUrl IS the API root (versioned) and the
+        // relative "chat/completions" path resolves against it.
+        val baseUrl = if (profile.fullUrlMode) {
+            deriveOriginWithTrailingSlash(profile.baseUrl)
+        } else {
+            profile.baseUrl.let { if (it.endsWith("/")) it else "$it/" }
+        }
 
         // Logging: NONE in streaming path. Even BASIC level reads every response
         // chunk to print its metadata, which forces buffering and delays SSE
@@ -186,5 +209,22 @@ private class OpenAiCompatibleProvider(
         }
         if (parts.isEmpty()) parts.add(ContentPart.Text(text = ""))
         return MessageDto(role = role.name.lowercase(), content = parts)
+    }
+
+    /**
+     * Extracts `scheme://host[:port]/` from an absolute URL so Retrofit.Builder
+     * has a valid baseUrl placeholder when [ApiProfileEntity.fullUrlMode] is on.
+     * Falls back to the input (Retrofit will throw on build if invalid) when the
+     * URL is malformed — better to fail loud than silently route to localhost.
+     */
+    private fun deriveOriginWithTrailingSlash(url: String): String {
+        return runCatching {
+            val u = java.net.URL(url)
+            buildString {
+                append(u.protocol).append("://").append(u.host)
+                if (u.port != -1) append(':').append(u.port)
+                append('/')
+            }
+        }.getOrDefault(url.let { if (it.endsWith("/")) it else "$it/" })
     }
 }
