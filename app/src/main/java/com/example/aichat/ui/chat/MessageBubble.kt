@@ -10,7 +10,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -191,30 +190,31 @@ fun MessageBubble(
 
                             if (message.content.isNotBlank()) {
                                 if (isUser) {
-                                    SelectionContainer {
-                                        Text(
-                                            text = message.content,
-                                            color = chatColors.onUserBubbleColor,
-                                            style = MaterialTheme.typography.bodyMedium
-                                        )
-                                    }
+                                    Text(
+                                        text = message.content,
+                                        color = chatColors.onUserBubbleColor,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
                                 } else if (!message.isStreaming && looksLikeHtmlPage(message.content)) {
                                     // Complete HTML page - render as an embedded WebView card
                                     HtmlCard(html = message.content)
                                 } else {
-                                    // SelectionContainer enables native text-selection
-                                    // handles so the user can copy arbitrary spans
-                                    // (long-press → drag handles). The legacy
-                                    // "复制" menu item was removed in favor of this;
-                                    // "分享" remains as a quick-share-whole-bubble.
-                                    SelectionContainer {
-                                        MarkdownText(
-                                            text = message.content,
-                                            style = MaterialTheme.typography.bodyMedium.copy(
-                                                color = chatColors.onAiBubbleColor
-                                            )
+                                    // v4.2.5: SelectionContainer removed. The
+                                    // native text-selection ActionMode was the
+                                    // source of the duplicate "复制" oval popup
+                                    // that appeared alongside our long-press
+                                    // DropdownMenu. Compose 1.6.x doesn't allow
+                                    // customising the ActionMode contents, so
+                                    // the choice is: keep both popups (confusing)
+                                    // or remove SelectionContainer and rely on
+                                    // the long-press menu for copy/share/etc.
+                                    // User picked the single-menu route.
+                                    MarkdownText(
+                                        text = message.content,
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            color = chatColors.onAiBubbleColor
                                         )
-                                    }
+                                    )
                                 }
                             }
 
@@ -309,14 +309,12 @@ fun MessageBubble(
                                 Column(
                                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                                 ) {
-                                    SelectionContainer {
-                                        MarkdownText(
-                                            text = segment.markdown,
-                                            style = MaterialTheme.typography.bodyMedium.copy(
-                                                color = chatColors.onAiBubbleColor
-                                            )
+                                    MarkdownText(
+                                        text = segment.markdown,
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            color = chatColors.onAiBubbleColor
                                         )
-                                    }
+                                    )
                                     // Streaming cursor only on the last text segment
                                     // (mirrors the single-bubble behaviour above).
                                     if (idx == segments.lastIndex &&

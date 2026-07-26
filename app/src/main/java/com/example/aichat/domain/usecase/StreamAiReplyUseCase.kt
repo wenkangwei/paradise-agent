@@ -166,10 +166,33 @@ class StreamAiReplyUseCase @Inject constructor(
             }
 
             // 5. Finalise the placeholder row.
-            val finalContent = if (apiError != null) {
-                "⚠️ $apiError"
-            } else {
-                contentBuilder.toString()
+            //
+            // v4.2.5: NEVER delete the AI placeholder row. The previous
+            // `else { deleteMessage(aiMessageId) }` branch was the source
+            // of the recurring "AI bubble disappears after lock screen"
+            // regression. When the :streaming process is killed by Android
+            // (Doze / OEM killer / memory pressure) while the model is still
+            // in its thinking phase — before the first content token — the
+            // CancellationException path lands here with empty
+            // `contentBuilder` AND empty `reasoningBuilder`. The old code
+            // would then DELETE the row, making the streaming bubble the
+            // user saw a second ago vanish from the chat on next open.
+            //
+            // Now: always UPDATE. If we have no content AND no reasoning AND
+            // no error message to surface, write a visible placeholder so
+            // the bubble remains in the conversation history — the user can
+            // see "this reply was interrupted" and tap retry, instead of
+            // wondering where the message went.
+            val finalContent = when {
+                apiError != null -> "⚠️ $apiError"
+                contentBuilder.isNotEmpty() -> contentBuilder.toString()
+                // No content but reasoning exists: keep content empty so the
+                // rendered bubble shows just the reasoning section. The row
+                // is preserved; only its body is blank.
+                reasoningBuilder.isNotEmpty() -> ""
+                // Truly nothing was emitted: surface a visible marker so the
+                // bubble isn't invisible in the chat list.
+                else -> "（已中断，请重试）"
             }
             val finalReasoning = if (apiError != null) null else reasoningBuilder.toString().ifBlank { null }
             val status = when {
@@ -178,43 +201,40 @@ class StreamAiReplyUseCase @Inject constructor(
                 finishedNormally == false -> MessageStatus.INTERRUPTED
                 else -> MessageStatus.COMPLETE
             }
-            if (finalContent.isNotBlank() || finalReasoning != null) {
-                withContext(NonCancellable) {
-                    runCatching {
-                        repository.updateStreamingMessage(
-                            id = aiMessageId,
-                            content = finalContent,
-                            reasoningContent = finalReasoning,
-                            status = status.name
+            val interruptedReason = when {
+                apiError != null -> apiError
+                finishedNormally == false -> "interrupted"
+                else -> null
+            }
+            withContext(NonCancellable) {
+                runCatching {
+                    repository.updateStreamingMessage(
+                        id = aiMessageId,
+                        content = finalContent,
+                        reasoningContent = finalReasoning,
+                        status = status.name
+                    )
+                    if (interruptedReason != null) {
+                        repository.updateMessageMetadata(
+                            aiMessageId,
+                            MessageMetadata(
+                                interruptedReason = interruptedReason,
+                                errorCategory = errorCategory
+                            )
                         )
-                        when {
-                            apiError != null -> repository.updateMessageMetadata(
-                                aiMessageId,
-                                MessageMetadata(
-                                    interruptedReason = apiError,
-                                    errorCategory = errorCategory
-                                )
-                            )
-                            status == MessageStatus.INTERRUPTED -> repository.updateMessageMetadata(
-                                aiMessageId,
-                                MessageMetadata(interruptedReason = "user_cancelled")
-                            )
-                        }
-                        // Don't touch conversation lastMessage with the error
-                        // text — keep the user's prompt as the latest entry so
-                        // the conversation list preview stays meaningful.
-                        if (apiError == null) {
-                            repository.touchConversation(
-                                conversationId,
-                                finalContent.take(100),
-                                System.currentTimeMillis()
-                            )
-                        }
                     }
-                }
-            } else {
-                withContext(NonCancellable) {
-                    runCatching { repository.deleteMessage(aiMessageId) }
+                    // Don't touch conversation lastMessage with the error
+                    // text — keep the user's prompt as the latest entry so
+                    // the conversation list preview stays meaningful.
+                    if (apiError == null && finalContent.isNotBlank() &&
+                        finalContent != "（已中断，请重试）"
+                    ) {
+                        repository.touchConversation(
+                            conversationId,
+                            finalContent.take(100),
+                            System.currentTimeMillis()
+                        )
+                    }
                 }
             }
 
