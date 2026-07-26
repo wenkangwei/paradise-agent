@@ -6,10 +6,12 @@ import androidx.room.TypeConverters
 import com.example.aichat.data.local.dao.AgentProfileDao
 import com.example.aichat.data.local.dao.ApiProfileDao
 import com.example.aichat.data.local.dao.ConversationDao
+import com.example.aichat.data.local.dao.FavoriteToolDao
 import com.example.aichat.data.local.dao.MessageDao
 import com.example.aichat.data.local.entity.AgentProfileEntity
 import com.example.aichat.data.local.entity.ApiProfileEntity
 import com.example.aichat.data.local.entity.ConversationEntity
+import com.example.aichat.data.local.entity.FavoriteToolEntity
 import com.example.aichat.data.local.entity.MessageEntity
 
 @Database(
@@ -17,9 +19,10 @@ import com.example.aichat.data.local.entity.MessageEntity
         ConversationEntity::class,
         MessageEntity::class,
         ApiProfileEntity::class,
-        AgentProfileEntity::class
+        AgentProfileEntity::class,
+        FavoriteToolEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 @TypeConverters(AttachmentConverter::class)
@@ -28,4 +31,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
     abstract fun apiProfileDao(): ApiProfileDao
     abstract fun agentProfileDao(): AgentProfileDao
+    abstract fun favoriteToolDao(): FavoriteToolDao
 }

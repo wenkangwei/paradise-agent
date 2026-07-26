@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.aichat.ui.chat.toolcard.CodeHighlighter
 import com.example.aichat.ui.theme.ChatColorScheme
 import com.example.aichat.ui.theme.chatColors
 
@@ -326,7 +327,7 @@ private fun CodeBlock(
             }
         }
         Text(
-            text = code,
+            text = CodeHighlighter.highlight(code, lang),
             modifier = Modifier
                 .fillMaxWidth()
                 // NOTE: no per-block verticalScroll - each scrollable code

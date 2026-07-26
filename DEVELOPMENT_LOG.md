@@ -4,6 +4,84 @@
 
 ---
 
+## v4.2 — 2026-07-26（工具卡片：拆分 / 收藏 / 分享 / 全屏）
+
+### 触发原因
+v4.1 之后用户反馈：AI 回复里的**完整 HTML 页面**和**长 Markdown 文档**
+在 320dp 文字气泡里被挤变形——表格换行、SVG 被压扁、代码块要拖半屏
+才能读完。Kimi 那种"代码片段内嵌高亮 + 大文档独立卡片"才是想要的
+体验。同时用户希望能像 ChatGPT 的 artifacts 一样**收藏**和**分享**
+工具到微信 / 浏览器。
+
+### 核心设计
+1. **启发式分段（ToolCardRecognizer）**：把 AI 回复按内容切成
+   `CardSegment.{Text, Tool}`：
+   - 围栏 ```html / ```markdown 块 → Tool
+   - 裸 `<!DOCTYPE html>…</html>` → Tool
+   - > 20 行的围栏 Markdown 块 → Tool（避免短片段也被拆）
+   - 其余 → Text，走原 MarkdownText 渲染
+2. **代码块语法高亮（CodeHighlighter）**：零依赖 regex token 着色
+   （Python/JS/TS/Kotlin/Java/Go/Rust/SQL/Bash/JSON/HTML/XML/CSS/YAML）
+   ——遵循 v4.x 的"不加 300KB commonmark"原则，自己的 MarkdownText 走
+   自己的高亮器。
+3. **三种工具入口**：
+   - ⤢ 全屏 BottomSheet（`ToolCardFullScreen`）—— 代码/预览 FilterChip
+     切换；HTML 走 WebView，Markdown 走 monospace fallback
+   - ⭐ 收藏 → 弹 `FavoriteToolDialog` 让用户起名 → 入库
+   - ↗ 分享 → `ToolSharer` 写 cacheDir/shared/ + FileProvider +
+     ACTION_SEND chooser（HTML 走浏览器，Markdown 走 .md 文件）
+4. **抽屉双分组（ChatListDrawer）**：默认折叠"收藏工具"+ 默认展开
+   "历史对话"。第一次有收藏时自动展开收藏组。点收藏 → 内容预填到
+   输入框（pendingInput 一次性 slot），用户决定是否编辑后发送。
+
+### 数据层
+- 新表 `favorite_tools(id, title, content, type, sourceMessageId, createdAt)`
+  + 索引 createdAt
+- `MIGRATION_8_9`：建表 + 索引；DB version 8 → 9
+- `FavoriteToolRepository`：observeAll / insert / delete / count
+- 注：Room 多进程失效（main + :streaming）会自动同步这张新表
+
+### 14 个 Phase
+1. 数据层（Entity + Dao + Migration）
+2. FavoriteToolRepository
+3. Hilt 注入 Dao
+4. ToolCardRecognizer（启发式拆分）
+5. CodeHighlighter（语法高亮）
+6. MarkdownText 接入高亮
+7. ToolCard 组件（预览卡片 + 3 个图标按钮）
+8. ToolCardFullScreen（ModalBottomSheet + 代码/预览切换）
+9. FavoriteToolDialog（命名对话框）
+10. ToolSharer（FileProvider + ACTION_SEND）
+11. file_paths.xml 加 `shared/` 路径
+12. MessageBubble 分段渲染（Text 走 widthIn(320)，Tool 突破到 fillMaxWidth）
+13. 抽屉双分组 + FavoriteToolItem
+14. ViewModel + ChatScreen 接线（favoriteTools 状态、pendingInput 通道、
+    sheet/dialog hoisted state、share 路由）
+
+### 踩坑
+- **Material Icons 没有 OpenInFull**：换成 `Icons.Filled.Fullscreen`
+- **ToolCardRecognizer collectFenced 丢语言**：原实现返回 `"" to body`
+  把语言标签丢了，导致 HTML 块被识别成 Markdown。改用 firstOrNull 找
+  关闭围栏下标 + subList 抽 body
+- **Column.widthIn(320) 把 ToolCard 限死**：分段渲染的 Column 必须
+  `fillMaxWidth()`，ToolCard 才能 break out；Text 段自己在 Surface 上
+  保留 `widthIn(max=320.dp)`
+- **Modifier.background 不能靠"私有 val 扩展"塞**：第一次写了个
+  `private val Modifier.background get() = this` 想偷懒，Kotlin 直接
+  编译失败；老老实实 `import androidx.compose.foundation.background`
+- **ToolCardFullScreen 引用未 import 的 Share 图标**：原代码用全限定
+  路径 `androidx.compose.material.icons.Icons.Filled.Share`，但没加
+  import；改成 `Icons.Filled.Share` + 显式 import 才通过
+
+### 待办
+- Markdown 全屏预览目前是 monospace 源码 fallback；后续要引入
+  commonmark-java（~300KB）才好看，或者把 MarkdownText 的 Compose
+  节点搬过来
+- ToolSharer 不做 Markdown → HTML 转换，直接发 .md 让接收端自己渲染
+- 收藏工具还没有"跳到源消息"功能（sourceMessageId 已存但未消费）
+
+---
+
 ## v4.1 — 2026-07-26（UX 增强 + 两个关键 bug 修复）
 
 ### 触发原因

@@ -95,12 +95,30 @@ fun ChatInputBar(
     pendingAttachments: List<Attachment> = emptyList(),
     onAddAttachment: (String, String) -> Unit,
     onRemoveAttachment: (String) -> Unit,
+    /**
+     * One-shot external prefill. When it goes non-null the bar replaces its
+     * current text with this value, brings up the IME, and immediately calls
+     * [onPendingInputConsumed] so the caller can clear the slot. Used for
+     * "tap a favorite tool → load into input box" (see ChatViewModel.useFavoriteTool).
+     */
+    pendingInput: String? = null,
+    onPendingInputConsumed: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var text by rememberSaveable { mutableStateOf("") }
     var showSheet by rememberSaveable { mutableStateOf(false) }
     val keyboard = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
+
+    // Drain any external prefill exactly once per non-null emission.
+    LaunchedEffect(pendingInput) {
+        if (pendingInput != null) {
+            text = pendingInput
+            onPendingInputConsumed()
+            // Don't auto-send — let the user edit / review first.
+            keyboard?.show()
+        }
+    }
 
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 

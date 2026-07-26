@@ -7,6 +7,7 @@ import com.example.aichat.data.local.AppDatabase
 import com.example.aichat.data.local.dao.AgentProfileDao
 import com.example.aichat.data.local.dao.ApiProfileDao
 import com.example.aichat.data.local.dao.ConversationDao
+import com.example.aichat.data.local.dao.FavoriteToolDao
 import com.example.aichat.data.local.dao.MessageDao
 import dagger.Module
 import dagger.Provides
@@ -43,4 +44,7 @@ object DatabaseModule {
 
     @Provides
     fun provideAgentProfileDao(db: AppDatabase): AgentProfileDao = db.agentProfileDao()
+
+    @Provides
+    fun provideFavoriteToolDao(db: AppDatabase): FavoriteToolDao = db.favoriteToolDao()
 }

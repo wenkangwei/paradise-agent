@@ -5,6 +5,9 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.aichat.data.remote.AttachmentEncoder
+import com.example.aichat.data.repository.FavoriteTool
+import com.example.aichat.data.repository.FavoriteToolRepository
+import com.example.aichat.data.repository.FavoriteToolType
 import com.example.aichat.domain.model.Message
 import com.example.aichat.domain.model.MessageStatus
 import com.example.aichat.domain.model.Role
@@ -13,6 +16,7 @@ import com.example.aichat.service.StreamingService
 import com.example.aichat.ui.chat.model.Attachment
 import com.example.aichat.ui.chat.model.ChatMessage
 import com.example.aichat.ui.chat.model.toChatMessages
+import com.example.aichat.ui.chat.toolcard.ToolType
 import com.google.gson.Gson
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -58,6 +62,7 @@ import kotlinx.coroutines.withContext
 class ChatViewModel @Inject constructor(
     private val repository: ChatRepository,
     private val apiProfileRepo: com.example.aichat.data.repository.ApiProfileRepository,
+    private val favoriteToolRepo: FavoriteToolRepository,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
@@ -74,6 +79,7 @@ class ChatViewModel @Inject constructor(
         observeConversations()
         observeApiProfiles()
         observeStreamingConversations()
+        observeFavoriteTools()
         // One-time sweep of STREAMING rows orphaned by a previous :streaming
         // process that died mid-stream (app crashed, OEM killed, reboot).
         // Without this the drawer would show a green dot forever on dead
@@ -126,6 +132,87 @@ class ChatViewModel @Inject constructor(
                 _uiState.update { it.copy(streamingConversationIds = ids) }
             }
         }
+    }
+
+    /**
+     * Keeps the drawer's "收藏工具" section in sync with Room. The first time
+     * a tool lands in the table we also flip `favoritesInitialExpanded` so
+     * the user notices their newly-pinned tool without having to manually
+     * open the section. (We don't observe count==0 → collapse again later,
+     * because manually-collapsed-by-user should stay collapsed; the screen
+     * only reads the initial value at first composition.)
+     */
+    private fun observeFavoriteTools() {
+        viewModelScope.launch {
+            favoriteToolRepo.observeAll().collect { tools ->
+                _uiState.update { it.copy(favoriteTools = tools) }
+            }
+        }
+    }
+
+    /**
+     * Persist a tool card the user starred in chat.
+     *
+     * @param content raw HTML / Markdown source
+     * @param type    recognized by ToolCardRecognizer on the chat side
+     * @param title   user-edited name from FavoriteToolDialog (caller passes
+     *   the trimmed value; never blank)
+     * @param sourceMessageId the AI message the tool was pulled from, so a
+     *   future "jump to source" feature can resolve it. Null when shared from
+     *   outside a chat bubble.
+     */
+    fun saveFavoriteTool(
+        content: String,
+        type: ToolType,
+        title: String,
+        sourceMessageId: String? = null
+    ) {
+        val repoType = when (type) {
+            ToolType.HTML -> FavoriteToolType.HTML
+            ToolType.MARKDOWN -> FavoriteToolType.MARKDOWN
+        }
+        viewModelScope.launch {
+            runCatching {
+                favoriteToolRepo.insert(
+                    title = title,
+                    content = content,
+                    type = repoType,
+                    sourceMessageId = sourceMessageId
+                )
+            }.onFailure { e ->
+                _events.emit(ChatEvent.ShowError("收藏失败: ${e.message ?: "未知错误"}", null))
+            }
+        }
+    }
+
+    fun deleteFavoriteTool(id: String) {
+        viewModelScope.launch {
+            runCatching { favoriteToolRepo.delete(id) }
+                .onFailure { e ->
+                    _events.emit(ChatEvent.ShowError("删除失败: ${e.message ?: "未知错误"}", null))
+                }
+        }
+    }
+
+    /**
+     * Tap-on-favorite in the drawer → push the tool's content into the input
+     * bar so the user can edit / re-send it as a prompt.
+     *
+     * We deliberately don't auto-send: the content may be a long HTML doc and
+     * the user may have meant to copy it, share it, or just inspect it.
+     * Putting it in the input box lets them choose.
+     */
+    fun useFavoriteTool(tool: FavoriteTool) {
+        _uiState.update { it.copy(pendingInput = tool.content) }
+    }
+
+    /**
+     * Called by ChatScreen once the input bar has consumed [ChatUiState.pendingInput].
+     * Resets the slot to null so the same text isn't re-injected on recomposition
+     * (e.g. after a rotation).
+     */
+    fun consumePendingInput() {
+        _uiState.update { it.copy(pendingInput = null) }
     }
 
     private fun observeMessages(conversationId: String) {

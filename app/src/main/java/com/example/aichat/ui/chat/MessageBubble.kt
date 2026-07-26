@@ -59,6 +59,11 @@ import androidx.compose.ui.unit.dp
 import com.example.aichat.domain.model.MessageStatus
 import com.example.aichat.ui.chat.model.ChatMessage
 import com.example.aichat.ui.chat.model.Role
+import com.example.aichat.ui.chat.toolcard.CardSegment
+import com.example.aichat.ui.chat.toolcard.ToolCard
+import com.example.aichat.ui.chat.toolcard.ToolCardRecognizer
+import com.example.aichat.ui.chat.toolcard.ToolType
+import com.example.aichat.ui.chat.toolcard.deriveToolTitle
 import com.example.aichat.ui.theme.chatColors
 
 /**
@@ -73,12 +78,22 @@ import com.example.aichat.ui.theme.chatColors
  * (attachments on top, text below). Each attachment group gets its own visual
  * treatment via [MessageAttachmentList].
  */
+/**
+ * Tool-card callbacks. Each callback receives the segment's source content
+ * and type so the caller (ChatScreen) can route to the full-screen sheet,
+ * the favorite-tool dialog, or the share intent without re-parsing.
+ */
+typealias ToolCardAction = (content: String, type: ToolType) -> Unit
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessageBubble(
     message: ChatMessage,
     onReact: (String) -> Unit,
     onRetry: () -> Unit = {},
+    onOpenTool: ToolCardAction = { _, _ -> },
+    onCollectTool: ToolCardAction = { _, _ -> },
+    onShareTool: ToolCardAction = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == Role.USER
@@ -103,7 +118,7 @@ fun MessageBubble(
             verticalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier
                 .padding(horizontal = 4.dp, vertical = 2.dp)
-                .widthIn(max = 320.dp)
+                .fillMaxWidth()
         ) {
             // 1) Attachment bubble (its own surface, distinct from text)
             if (message.attachments.isNotEmpty()) {
@@ -120,91 +135,209 @@ fun MessageBubble(
                 }
             }
 
-            // 2) Text bubble (or streaming cursor placeholder)
-            if (message.content.isNotBlank() || (message.isStreaming && message.attachments.isEmpty())) {
-                Surface(
-                    shape = bubbleShape,
-                    color = if (isUser) chatColors.userBubbleColor else chatColors.aiBubbleColor,
-                    tonalElevation = if (isUser) 2.dp else 1.dp,
-                    modifier = Modifier
-                        .widthIn(max = 320.dp)
-                        .combinedClickable(
-                            enabled = !message.isStreaming,
-                            onClick = {},
-                            onLongClick = { showMenu = true }
-                        )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                    ) {
-                        // Reasoning / thinking trace — only for AI + when present
-                        if (!isUser && !message.reasoningContent.isNullOrBlank()) {
-                            ReasoningSection(
-                                reasoning = message.reasoningContent,
-                                isStreaming = message.isStreaming && message.content.isBlank()
-                            )
-                            if (message.content.isNotBlank()) Spacer(Modifier.height(8.dp))
-                        }
+            // Tool-card segmentation: only for non-streaming AI messages whose
+            // body actually contains a "tool" (full HTML page / long markdown
+            // document). Everything else — user text, streaming partials, plain
+            // markdown replies — falls through to the legacy single-bubble path.
+            val segments = remember(message.content, message.isStreaming, isUser) {
+                if (isUser || message.isStreaming || message.content.isBlank()) {
+                    emptyList()
+                } else {
+                    ToolCardRecognizer.split(message.content)
+                }
+            }
+            val hasToolCards = segments.any { it is CardSegment.Tool }
 
-                        // Search results (RAG) — only for AI + when metadata carries them
-                        if (!isUser) {
-                            message.metadata?.searchResults?.takeIf { it.isNotEmpty() }?.let { results ->
-                                SearchResultsSection(results = results)
+            if (!hasToolCards) {
+                // 2) Text bubble (or streaming cursor placeholder)
+                if (message.content.isNotBlank() || (message.isStreaming && message.attachments.isEmpty())) {
+                    Surface(
+                        shape = bubbleShape,
+                        color = if (isUser) chatColors.userBubbleColor else chatColors.aiBubbleColor,
+                        tonalElevation = if (isUser) 2.dp else 1.dp,
+                        modifier = Modifier
+                            .widthIn(max = 320.dp)
+                            .combinedClickable(
+                                enabled = !message.isStreaming,
+                                onClick = {},
+                                onLongClick = { showMenu = true }
+                            )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                        ) {
+                            // Reasoning / thinking trace — only for AI + when present
+                            if (!isUser && !message.reasoningContent.isNullOrBlank()) {
+                                ReasoningSection(
+                                    reasoning = message.reasoningContent,
+                                    isStreaming = message.isStreaming && message.content.isBlank()
+                                )
                                 if (message.content.isNotBlank()) Spacer(Modifier.height(8.dp))
                             }
-                        }
 
-                        if (message.content.isNotBlank()) {
-                            if (isUser) {
-                                Text(
-                                    text = message.content,
-                                    color = chatColors.onUserBubbleColor,
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                            } else if (!message.isStreaming && looksLikeHtmlPage(message.content)) {
-                                // Complete HTML page - render as an embedded WebView card
-                                HtmlCard(html = message.content)
-                            } else {
-                                MarkdownText(
-                                    text = message.content,
-                                    style = MaterialTheme.typography.bodyMedium.copy(
-                                        color = chatColors.onAiBubbleColor
+                            // Search results (RAG) — only for AI + when metadata carries them
+                            if (!isUser) {
+                                message.metadata?.searchResults?.takeIf { it.isNotEmpty() }?.let { results ->
+                                    SearchResultsSection(results = results)
+                                    if (message.content.isNotBlank()) Spacer(Modifier.height(8.dp))
+                                }
+                            }
+
+                            if (message.content.isNotBlank()) {
+                                if (isUser) {
+                                    Text(
+                                        text = message.content,
+                                        color = chatColors.onUserBubbleColor,
+                                        style = MaterialTheme.typography.bodyMedium
                                     )
+                                } else if (!message.isStreaming && looksLikeHtmlPage(message.content)) {
+                                    // Complete HTML page - render as an embedded WebView card
+                                    HtmlCard(html = message.content)
+                                } else {
+                                    MarkdownText(
+                                        text = message.content,
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            color = chatColors.onAiBubbleColor
+                                        )
+                                    )
+                                }
+                            }
+
+                            if (message.isStreaming && message.content.isBlank() && message.reasoningContent.isNullOrBlank()) {
+                                // No content yet AND no reasoning — animated thinking indicator.
+                                StreamingPlaceholder(color = chatColors.onAiBubbleColor)
+                            } else if (message.isStreaming && message.content.isNotBlank()) {
+                                Spacer(Modifier.height(2.dp))
+                                StreamingCursor(color = chatColors.onAiBubbleColor)
+                            }
+
+                            if (!isUser && !message.isStreaming && message.content.isNotBlank()) {
+                                Spacer(Modifier.height(6.dp))
+                                ReactionRow(
+                                    reaction = message.reaction,
+                                    onReact = onReact
                                 )
                             }
-                        }
 
-                        if (message.isStreaming && message.content.isBlank() && message.reasoningContent.isNullOrBlank()) {
-                            // No content yet AND no reasoning — animated thinking indicator.
-                            // When reasoning_content is already streaming (thinking models
-                            // like glm-5.2, DeepSeek-R1), the ReasoningSection above is
-                            // already visible and showing progress; showing "拼命思考中"
-                            // below it would make the user think the request is stuck.
-                            StreamingPlaceholder(color = chatColors.onAiBubbleColor)
-                        } else if (message.isStreaming && message.content.isNotBlank()) {
-                            Spacer(Modifier.height(2.dp))
-                            StreamingCursor(color = chatColors.onAiBubbleColor)
+                            if (!isUser && message.status == MessageStatus.FAILED) {
+                                Spacer(Modifier.height(8.dp))
+                                RetryButton(onClick = onRetry)
+                            }
                         }
-
-                        // AI-only feedback row (like / dislike) — Kimi style.
-                        // Shown only after streaming completes and content is non-empty.
-                        if (!isUser && !message.isStreaming && message.content.isNotBlank()) {
-                            Spacer(Modifier.height(6.dp))
-                            ReactionRow(
-                                reaction = message.reaction,
-                                onReact = onReact
+                    }
+                }
+            } else {
+                // Segmented rendering: text stays in bubbles (max-width 320dp),
+                // tool cards break out to the full content width so tables /
+                // SVGs / wide layouts aren't crushed.
+                //
+                // Reasoning + search results are pulled out to their own
+                // leading bubble so they read as preamble, not as the first
+                // segment.
+                if (!isUser && !message.reasoningContent.isNullOrBlank()) {
+                    Surface(
+                        shape = bubbleShape,
+                        color = chatColors.aiBubbleColor,
+                        tonalElevation = 1.dp,
+                        modifier = Modifier.widthIn(max = 320.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                            ReasoningSection(
+                                reasoning = message.reasoningContent,
+                                isStreaming = false
                             )
                         }
+                    }
+                }
+                if (!isUser) {
+                    message.metadata?.searchResults?.takeIf { it.isNotEmpty() }?.let { results ->
+                        Surface(
+                            shape = bubbleShape,
+                            color = chatColors.aiBubbleColor,
+                            tonalElevation = 1.dp,
+                            modifier = Modifier.widthIn(max = 320.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                SearchResultsSection(results = results)
+                            }
+                        }
+                    }
+                }
 
-                        // Retry affordance — shown when the previous request
-                        // failed (HTTP 4xx/5xx, network drop). Tapping re-issues
-                        // the same user prompt through the streaming service;
-                        // UseCase REPLACEs this row in place via the shared
-                        // aiMessageId, so the failed bubble is overwritten by
-                        // the new streaming attempt.
-                        if (!isUser && message.status == MessageStatus.FAILED) {
-                            Spacer(Modifier.height(8.dp))
-                            RetryButton(onClick = onRetry)
+                segments.forEachIndexed { idx, segment ->
+                    when (segment) {
+                        is CardSegment.Text -> {
+                            Surface(
+                                shape = bubbleShape,
+                                color = chatColors.aiBubbleColor,
+                                tonalElevation = 1.dp,
+                                modifier = Modifier
+                                    .widthIn(max = 320.dp)
+                                    .combinedClickable(
+                                        enabled = true,
+                                        onClick = {},
+                                        onLongClick = { showMenu = true }
+                                    )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                                ) {
+                                    MarkdownText(
+                                        text = segment.markdown,
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            color = chatColors.onAiBubbleColor
+                                        )
+                                    )
+                                    // Streaming cursor only on the last text segment
+                                    // (mirrors the single-bubble behaviour above).
+                                    if (idx == segments.lastIndex &&
+                                        message.isStreaming && message.content.isNotBlank()
+                                    ) {
+                                        Spacer(Modifier.height(2.dp))
+                                        StreamingCursor(color = chatColors.onAiBubbleColor)
+                                    }
+                                    // Reaction / retry attach to the last text segment so
+                                    // they stay visually grouped with the bubble row.
+                                    if (idx == segments.lastIndex &&
+                                        !message.isStreaming && message.content.isNotBlank()
+                                    ) {
+                                        Spacer(Modifier.height(6.dp))
+                                        ReactionRow(reaction = message.reaction, onReact = onReact)
+                                    }
+                                    if (idx == segments.lastIndex && message.status == MessageStatus.FAILED) {
+                                        Spacer(Modifier.height(8.dp))
+                                        RetryButton(onClick = onRetry)
+                                    }
+                                }
+                            }
+                        }
+                        is CardSegment.Tool -> {
+                            val title = remember(segment.content, segment.type) {
+                                deriveToolTitle(segment.content, segment.type)
+                            }
+                            ToolCard(
+                                title = title,
+                                content = segment.content,
+                                type = segment.type,
+                                onOpen = { onOpenTool(segment.content, segment.type) },
+                                onCollect = { onCollectTool(segment.content, segment.type) },
+                                onShare = { onShareTool(segment.content, segment.type) }
+                            )
+                        }
+                    }
+                }
+
+                // Streaming placeholder when the model hasn't started emitting
+                // content yet (e.g. thinking model cold start).
+                if (message.isStreaming && message.content.isBlank() && message.reasoningContent.isNullOrBlank()) {
+                    Surface(
+                        shape = bubbleShape,
+                        color = chatColors.aiBubbleColor,
+                        tonalElevation = 1.dp,
+                        modifier = Modifier.widthIn(max = 320.dp)
+                    ) {
+                        Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                            StreamingPlaceholder(color = chatColors.onAiBubbleColor)
                         }
                     }
                 }

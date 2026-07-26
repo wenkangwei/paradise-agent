@@ -66,6 +66,11 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.aichat.data.repository.ApiProfile
+import com.example.aichat.ui.chat.toolcard.FavoriteToolDialog
+import com.example.aichat.ui.chat.toolcard.ToolCardFullScreen
+import com.example.aichat.ui.chat.toolcard.ToolSharer
+import com.example.aichat.ui.chat.toolcard.ToolType
+import com.example.aichat.ui.chat.toolcard.deriveToolTitle
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -85,6 +90,42 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
+
+    // ---- Tool card sheet + favorite dialog state ----
+    // Both are hoisted here (not in MessageBubble) so they survive bubble
+    // recomposition and can route to ViewModel / FileProvider without
+    // threading context through the message list.
+    var fullScreenTool by remember {
+        mutableStateOf<ToolCardTarget?>(null)
+    }
+    var favoriteDialog by remember {
+        mutableStateOf<ToolCardTarget?>(null)
+    }
+
+    // Single share-action router. Wrapped in runCatching because share can
+    // throw if no app handles the intent (rare on Android but possible on
+    // stripped ROMs) — better to surface a snackbar than crash.
+    val onShareTool: (String, ToolType) -> Unit = remember(context) {
+        { content, type ->
+            val title = deriveToolTitle(content, type)
+            runCatching {
+                ToolSharer.share(
+                    context = context,
+                    title = title,
+                    content = content,
+                    type = type
+                )
+            }.onFailure { e ->
+                scope.launch {
+                    snackbarHostState.showSnackbar(
+                        message = "分享失败: ${e.message ?: "未知错误"}",
+                        withDismissAction = true,
+                        duration = androidx.compose.material3.SnackbarDuration.Short
+                    )
+                }
+            }
+        }
+    }
 
     // Keep the screen on while a stream is in progress so the user can watch
     // the reply render without the device sleeping and tearing down the
@@ -189,6 +230,7 @@ fun ChatScreen(
             ChatListDrawer(
                 conversations = uiState.conversations,
                 currentConversationId = uiState.currentConversationId,
+                favoriteTools = uiState.favoriteTools,
                 onNewChat = {
                     viewModel.newChat()
                     scope.launch { drawerState.close() }
@@ -200,11 +242,19 @@ fun ChatScreen(
                 onDeleteConversation = { id ->
                     viewModel.deleteConversation(id)
                 },
+                onUseFavoriteTool = { tool ->
+                    viewModel.useFavoriteTool(tool)
+                    scope.launch { drawerState.close() }
+                },
+                onDeleteFavoriteTool = { id ->
+                    viewModel.deleteFavoriteTool(id)
+                },
                 onOpenSettings = {
                     scope.launch { drawerState.close() }
                     onNavigateToSettings()
                 },
-                streamingConversationIds = uiState.streamingConversationIds
+                streamingConversationIds = uiState.streamingConversationIds,
+                favoritesInitialExpanded = uiState.favoriteTools.isNotEmpty()
             )
         }
     ) {
@@ -303,7 +353,22 @@ fun ChatScreen(
                             MessageBubble(
                                 message = message,
                                 onReact = { r -> viewModel.setMessageReaction(message.id, r) },
-                                onRetry = { viewModel.retryMessage(message.id) }
+                                onRetry = { viewModel.retryMessage(message.id) },
+                                onOpenTool = { content, type ->
+                                    fullScreenTool = ToolCardTarget(
+                                        title = deriveToolTitle(content, type),
+                                        content = content,
+                                        type = type
+                                    )
+                                },
+                                onCollectTool = { content, type ->
+                                    favoriteDialog = ToolCardTarget(
+                                        title = deriveToolTitle(content, type),
+                                        content = content,
+                                        type = type
+                                    )
+                                },
+                                onShareTool = onShareTool
                             )
                         }
                     }
@@ -363,14 +428,68 @@ fun ChatScreen(
                     onRemoveAttachment = { id ->
                         viewModel.removePendingAttachment(id)
                     },
+                    pendingInput = uiState.pendingInput,
+                    onPendingInputConsumed = { viewModel.consumePendingInput() },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(horizontal = 12.dp, vertical = 10.dp)
                 )
+
+                // ---- Tool-card overlays (hoisted at screen scope) ----
+                // Rendered inside the content Box so they layer above the
+                // chat list but below the drawer.
+                fullScreenTool?.let { target ->
+                    ToolCardFullScreen(
+                        title = target.title,
+                        content = target.content,
+                        type = target.type,
+                        onDismiss = { fullScreenTool = null },
+                        onCollect = {
+                            // Hand off to the favorite dialog with the same payload.
+                            favoriteDialog = target
+                            fullScreenTool = null
+                        },
+                        onShare = {
+                            onShareTool(target.content, target.type)
+                        }
+                    )
+                }
+                favoriteDialog?.let { target ->
+                    FavoriteToolDialog(
+                        initialTitle = target.title,
+                        type = target.type,
+                        preview = target.content,
+                        onConfirm = { finalTitle ->
+                            viewModel.saveFavoriteTool(
+                                content = target.content,
+                                type = target.type,
+                                title = finalTitle
+                            )
+                            favoriteDialog = null
+                            scope.launch {
+                                snackbarHostState.showSnackbar(
+                                    message = "已收藏：$finalTitle",
+                                    duration = androidx.compose.material3.SnackbarDuration.Short
+                                )
+                            }
+                        },
+                        onDismiss = { favoriteDialog = null }
+                    )
+                }
             }
         }
     }
 }
+
+/**
+ * Hoisted payload used to drive both the fullscreen tool sheet and the
+ * favorite-tool naming dialog. Same shape, different lifecycles.
+ */
+private data class ToolCardTarget(
+    val title: String,
+    val content: String,
+    val type: ToolType
+)
 
 @Composable
 private fun ScrollFab(

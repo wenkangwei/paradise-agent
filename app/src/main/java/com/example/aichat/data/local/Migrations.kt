@@ -139,12 +139,35 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
     }
 }
 
-/** All migrations from the initial v2 schema to the current v8. */
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // Pin-able tool cards extracted from AI replies (HTML page or long
+        // markdown document). See FavoriteToolEntity for the recognition rule.
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS favorite_tools (
+                id TEXT NOT NULL PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                type TEXT NOT NULL,
+                sourceMessageId TEXT,
+                createdAt INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_favorite_tools_createdAt ON favorite_tools(createdAt)"
+        )
+    }
+}
+
+/** All migrations from the initial v2 schema to the current v9. */
 val ALL_MIGRATIONS = arrayOf(
     MIGRATION_2_3,
     MIGRATION_3_4,
     MIGRATION_4_5,
     MIGRATION_5_6,
     MIGRATION_6_7,
-    MIGRATION_7_8
+    MIGRATION_7_8,
+    MIGRATION_8_9
 )
