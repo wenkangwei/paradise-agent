@@ -31,7 +31,8 @@ fun Message.toChatMessage(): ChatMessage {
         reasoningContent = reasoningContent,
         metadata = metadata,
         reaction = reaction,
-        status = status
+        status = status,
+        timestamp = timestamp
     )
 }
 

@@ -59,7 +59,13 @@ class LlmProviderFactoryImpl @Inject constructor(
 
     @Synchronized
     override fun get(profile: ApiProfileEntity): LlmProvider {
-        return cache.getOrPut(profile.id) {
+        // Cache key MUST include updatedAt: OpenAiCompatibleProvider bakes the
+        // profile's baseUrl/apiKey/model/fullUrlMode into its fields at
+        // construction time, so a stale cache hit (same id, new contents)
+        // would keep sending requests with the OLD config. Adding updatedAt
+        // forces a fresh provider whenever the profile is upserted.
+        val cacheKey = "${profile.id}@${profile.updatedAt}"
+        return cache.getOrPut(cacheKey) {
             val supplier = supplierRegistry.byId(profile.supplierId) ?: CustomSupplier
             OpenAiCompatibleProvider(profile, supplier, streamClient)
         }
@@ -104,8 +110,13 @@ private class OpenAiCompatibleProvider(
         val responseBody = try {
             apiService.streamChat(endpointPath, request)
         } catch (e: HttpException) {
+            // Read the server's actual error body — Retrofit's HttpException.message()
+            // is just "HTTP 400 Bad Request", which is useless for diagnosing
+            // auth/quota/schema errors. The real reason ("messages field is
+            // required", "Rate limit exceeded", "令牌已过期", ...) lives here.
+            val raw = runCatching { e.response()?.errorBody()?.string() }.getOrNull()
             throw com.example.aichat.data.remote.ApiException(
-                "API error: HTTP ${e.code()} - ${e.message()}", e
+                "API error: HTTP ${e.code()} - ${raw ?: e.message()}", e
             )
         } catch (e: IOException) {
             throw com.example.aichat.data.remote.NetworkException(
@@ -144,8 +155,9 @@ private class OpenAiCompatibleProvider(
 
         // Logging: NONE in streaming path. Even BASIC level reads every response
         // chunk to print its metadata, which forces buffering and delays SSE
-        // delivery to the parser → looks like GLM is "slow" when it's actually
-        // OkHttp holding back chunks for the logger. Set Level.NONE to be safe.
+        // delivery to the parser → looks like the model is "slow" when it's
+        // actually OkHttp holding back chunks for the logger.
+        // Server error bodies are surfaced in-app via ApiException (see stream()).
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.NONE
         }

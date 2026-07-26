@@ -35,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.aichat.domain.model.Conversation
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
@@ -53,7 +54,9 @@ fun ConversationItem(
     isStreaming: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val dateFormat = remember { SimpleDateFormat("MMM dd", Locale.getDefault()) }
+    val timeText = remember(conversation.updatedAt) {
+        formatConversationListTime(conversation.updatedAt)
+    }
 
     Card(
         onClick = onClick,
@@ -122,7 +125,7 @@ fun ConversationItem(
             }
 
             Text(
-                text = dateFormat.format(Date(conversation.updatedAt)),
+                text = timeText,
                 style = MaterialTheme.typography.labelSmall,
                 color = if (isSelected) {
                     MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
@@ -173,4 +176,34 @@ private fun StreamingDot() {
             .alpha(alpha)
             .background(Color(0xFF4CAF50), CircleShape)
     )
+}
+
+/**
+ * Compact relative time for the conversation list (WeChat style):
+ *   - Today:           "HH:mm"
+ *   - Yesterday:       "昨天"
+ *   - Day before y.:   "前天"
+ *   - This year:       "MM-dd"
+ *   - Older:           "yyyy-MM-dd"
+ *
+ * The list cell is narrow so we omit the clock for non-today rows; the
+ * exact time is still visible inside the chat as a TimeDivider.
+ */
+private fun formatConversationListTime(timestamp: Long): String {
+    val now = Calendar.getInstance()
+    val msg = Calendar.getInstance().apply { timeInMillis = timestamp }
+
+    val sameYear = now.get(Calendar.YEAR) == msg.get(Calendar.YEAR)
+    val dayDiff = now.get(Calendar.DAY_OF_YEAR) - msg.get(Calendar.DAY_OF_YEAR)
+    val isSameDay = sameYear && dayDiff == 0
+    val isYesterday = sameYear && dayDiff == 1
+    val isDayBeforeYesterday = sameYear && dayDiff == 2
+
+    return when {
+        isSameDay -> SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
+        isYesterday -> "昨天"
+        isDayBeforeYesterday -> "前天"
+        sameYear -> SimpleDateFormat("MM-dd", Locale.getDefault()).format(Date(timestamp))
+        else -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(timestamp))
+    }
 }

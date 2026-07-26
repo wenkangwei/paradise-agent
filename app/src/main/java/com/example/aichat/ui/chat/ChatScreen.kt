@@ -18,7 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -67,6 +67,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.aichat.data.repository.ApiProfile
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -96,9 +100,25 @@ fun ChatScreen(
         }
     }
 
-    // Auto-scroll to bottom when new messages arrive or streaming content updates
-    LaunchedEffect(uiState.messages.lastOrNull()?.content, uiState.messages.size) {
-        if (uiState.messages.isNotEmpty()) {
+    // Smart auto-scroll: only follow the latest content while the user is
+    // actually parked at the bottom of the list. Once they scroll up to read
+    // history, we stop yanking them back down — otherwise streaming token
+    // growth would pin them to the latest position and prevent reading.
+    // The user re-arms auto-follow by scrolling back to the bottom (or by
+    // tapping the scroll-down FAB).
+    val isAtBottom by remember {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val total = uiState.messages.size
+            // Treat "bottom" as: the very last message is visible (allow a
+            // 1-item tolerance because the streaming bubble grows downward
+            // and may briefly push the previous last out of view).
+            total > 0 && lastVisible >= 0 && lastVisible >= total - 2
+        }
+    }
+    LaunchedEffect(uiState.messages.lastOrNull()?.content, uiState.messages.size, isAtBottom) {
+        if (uiState.messages.isNotEmpty() && isAtBottom) {
             listState.animateScrollToItem(uiState.messages.lastIndex)
         }
     }
@@ -265,13 +285,25 @@ fun ChatScreen(
                         ),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        items(
+                        itemsIndexed(
                             items = uiState.messages,
-                            key = { it.id }
-                        ) { message ->
+                            key = { _, msg -> msg.id }
+                        ) { index, message ->
+                            // Time divider — WeChat-style. Show above the
+                            // message when:
+                            //   - it's the first message, OR
+                            //   - the previous message was > 5 minutes ago, OR
+                            //   - the day changed since the previous message
+                            val prev = uiState.messages.getOrNull(index - 1)
+                            if (prev == null ||
+                                message.timestamp - prev.timestamp >= FIVE_MINUTES_MS ||
+                                !isSameDay(message.timestamp, prev.timestamp)) {
+                                TimeDivider(timestamp = message.timestamp)
+                            }
                             MessageBubble(
                                 message = message,
-                                onReact = { r -> viewModel.setMessageReaction(message.id, r) }
+                                onReact = { r -> viewModel.setMessageReaction(message.id, r) },
+                                onRetry = { viewModel.retryMessage(message.id) }
                             )
                         }
                     }
@@ -461,3 +493,70 @@ private fun ProfileSelector(
         }
     }
 }
+
+/**
+ * Time divider shown between chat messages — WeChat-style centered pill
+ * with a relative timestamp. Inserted by the LazyColumn when the gap
+ * since the previous message exceeds [FIVE_MINUTES_MS] or the day changes.
+ */
+@Composable
+private fun TimeDivider(timestamp: Long, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Text(
+                text = remember(timestamp) { formatChatDividerTime(timestamp) },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+            )
+        }
+    }
+}
+
+/**
+ * Same day (calendar time, ignoring hours/minutes/seconds).
+ */
+private fun isSameDay(a: Long, b: Long): Boolean {
+    val ca = Calendar.getInstance().apply { timeInMillis = a }
+    val cb = Calendar.getInstance().apply { timeInMillis = b }
+    return ca.get(Calendar.YEAR) == cb.get(Calendar.YEAR) &&
+        ca.get(Calendar.DAY_OF_YEAR) == cb.get(Calendar.DAY_OF_YEAR)
+}
+
+/**
+ * Format a timestamp for the chat divider — always shows clock + granularity
+ * grows for older messages:
+ *   - Today:           "HH:mm"
+ *   - Yesterday:       "昨天 HH:mm"
+ *   - Day before y.:   "前天 HH:mm"
+ *   - This year:       "MM-dd HH:mm"
+ *   - Older:           "yyyy-MM-dd HH:mm"
+ */
+private fun formatChatDividerTime(timestamp: Long): String {
+    val now = Calendar.getInstance()
+    val msg = Calendar.getInstance().apply { timeInMillis = timestamp }
+    val sameYear = now.get(Calendar.YEAR) == msg.get(Calendar.YEAR)
+    val dayDiff = now.get(Calendar.DAY_OF_YEAR) - msg.get(Calendar.DAY_OF_YEAR)
+    val isSameDay = sameYear && dayDiff == 0
+    val isYesterday = sameYear && dayDiff == 1
+    val isDayBeforeYesterday = sameYear && dayDiff == 2
+    val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
+    return when {
+        isSameDay -> time
+        isYesterday -> "昨天 $time"
+        isDayBeforeYesterday -> "前天 $time"
+        sameYear -> SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(timestamp))
+        else -> SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(timestamp))
+    }
+}
+
+/** Minimum gap between adjacent messages to merit a time divider. */
+private const val FIVE_MINUTES_MS = 5L * 60 * 1000

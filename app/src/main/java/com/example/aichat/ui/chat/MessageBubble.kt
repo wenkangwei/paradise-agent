@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.ThumbDown
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -54,6 +56,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import com.example.aichat.domain.model.MessageStatus
 import com.example.aichat.ui.chat.model.ChatMessage
 import com.example.aichat.ui.chat.model.Role
 import com.example.aichat.ui.theme.chatColors
@@ -75,6 +78,7 @@ import com.example.aichat.ui.theme.chatColors
 fun MessageBubble(
     message: ChatMessage,
     onReact: (String) -> Unit,
+    onRetry: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == Role.USER
@@ -190,6 +194,17 @@ fun MessageBubble(
                                 reaction = message.reaction,
                                 onReact = onReact
                             )
+                        }
+
+                        // Retry affordance — shown when the previous request
+                        // failed (HTTP 4xx/5xx, network drop). Tapping re-issues
+                        // the same user prompt through the streaming service;
+                        // UseCase REPLACEs this row in place via the shared
+                        // aiMessageId, so the failed bubble is overwritten by
+                        // the new streaming attempt.
+                        if (!isUser && message.status == MessageStatus.FAILED) {
+                            Spacer(Modifier.height(8.dp))
+                            RetryButton(onClick = onRetry)
                         }
                     }
                 }
@@ -346,4 +361,35 @@ private fun StreamingCursor(
         modifier = modifier.alpha(alpha),
         style = MaterialTheme.typography.bodyMedium
     )
+}
+
+/**
+ * Retry affordance shown under a FAILED AI bubble. Uses FilledTonalButton so
+ * the action is obvious but doesn't compete with the primary send button
+ * (which is in the input bar). Compact size so it doesn't dominate the bubble.
+ */
+@Composable
+private fun RetryButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = modifier,
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            horizontal = 12.dp,
+            vertical = 0.dp
+        )
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Refresh,
+            contentDescription = null,
+            modifier = Modifier.size(14.dp)
+        )
+        Spacer(Modifier.size(6.dp))
+        Text(
+            text = "重试",
+            style = MaterialTheme.typography.labelMedium
+        )
+    }
 }

@@ -13,7 +13,9 @@ data class ChatMessage(
     val metadata: MessageMetadata? = null,
     val reaction: String? = null,
     /** Room status, used to decide when to stop the streaming spinner. */
-    val status: MessageStatus? = null
+    val status: MessageStatus? = null,
+    /** Epoch millis — used to render WeChat-style time dividers in the chat list. */
+    val timestamp: Long = 0L
 )
 
 data class Attachment(

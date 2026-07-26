@@ -4,6 +4,78 @@
 
 ---
 
+## v4.1 — 2026-07-26（UX 增强 + 两个关键 bug 修复）
+
+### 触发原因
+v4.0 主架构稳定后，用户报：
+1. **改完 API profile 设置后发消息 → 404 / 旧配置请求**，必须重启 app 才能恢复
+2. **点"新建对话" → 发消息 → 消息不显示在当前界面**，跑到了历史抽屉里的新 session 中，要点进去才能看到
+3. UI 短板：流式时用户向上阅读会被拽回底部、无时间分割线、失败消息不能重试、会话列表时间显示不友好
+4. 错误气泡只有 "API error: HTTP 400 - HTTP 400 Bad Request" 这种通用串，看不到服务器原话
+
+### 两个核心 bug 修复
+
+#### BUG-16 🔴 LlmProviderFactory LRU cache key 只用 profile.id
+- **位置**：`LlmProviderFactory.kt:62`
+- **现象**：用户改 profile（baseUrl/key/model/fullUrlMode）后发消息仍走旧配置 → 404 / 旧 endpoint
+- **根因**：`cache.getOrPut(profile.id)` 的 key 不含配置变更信号；`OpenAiCompatibleProvider` 构造时把 profile 各字段（含 OkHttp/Retrofit stack）烧死进实例字段。同一 id 命中 cache → 永远返回旧 provider。
+- **修复**：cache key = `"${profile.id}@${profile.updatedAt}"`，profile 内容变更时 updatedAt 改变 → 自动 miss → 构造新 provider
+- **验证方法**：改完 profile 立即发消息（不需要重启 app）
+
+#### BUG-17 🔴 newChat() 后 messagesObserverJob 残留引用
+- **位置**：`ChatViewModel.kt:307`
+- **现象**：点"新建对话" → 发消息 → 消息跑到历史里新建的 session，当前界面看不到
+- **根因**：`Job.cancel()` 只把协程标为取消态，**引用本身不置 null**。`sendMessage` 的 `if (messagesObserverJob == null) observeMessages(...)` 守卫因此永远 false → 新创建的 conversationId 不会被 observe → 用户消息和 AI 回复都写进 Room 但 UI 不订阅这条 Flow。
+- **修复**：`newChat()` cancel 后加 `messagesObserverJob = null`
+- **验证方法**：点"新建对话" → 发"你好" → 消息应立即显示在当前界面
+
+### UX 增强（微信风格）
+
+#### 1. 智能 auto-scroll（`ChatScreen.kt`）
+- 用户向上滚动阅读历史时，流式 token 不会把视图拽回底部
+- 滚到底部（或点 scroll-down FAB）重新启用 auto-follow
+- 实现：`derivedStateOf` 计算 `isAtBottom`，`LaunchedEffect` 加 `isAtBottom` key
+
+#### 2. 时间分割线（`ChatScreen.kt` + `ChatMessage.kt` + `ChatMessageMapper.kt`）
+- WeChat 风格居中胶囊分割线
+- 触发条件：首条消息 / 距上一条 >5 分钟 / 跨日
+- 格式：今天 `HH:mm` / 昨天 / 前天 / 本年 `MM-dd HH:mm` / 跨年 `yyyy-MM-dd HH:mm`
+- `ChatMessage` 加 `timestamp: Long` 字段，mapper 透传
+
+#### 3. 失败消息重试（`ChatViewModel.kt` + `MessageBubble.kt`）
+- FAILED 气泡下方显示"重试"按钮（FilledTonalButton + Refresh 图标）
+- `retryMessage(failedAiMessageId)`：反向找最近的 user 消息，复用 attachments，原 aiMessageId 透传给 UseCase → `OnConflictStrategy.REPLACE` 原地覆盖 FAILED 行
+- 共享 sendMessage 的并发保护（同 convId 自动 stop，跨 convId 检查 MAX_CONCURRENT_STREAMS）
+
+#### 4. 会话列表相对时间（`ConversationItem.kt`）
+- 替换原 `SimpleDateFormat("MMM dd")` 静态月日
+- 现在：今天 `HH:mm` / 昨天 / 前天 / 本年 `MM-dd` / 跨年 `yyyy-MM-dd`
+- 列表单元格窄，非今天的行省略具体时间（精确时间在 chat 内的 TimeDivider 看）
+
+### 错误信息可见性（`LlmProviderFactory.kt`）
+- 之前：`HttpException.message()` 只有 "HTTP 400 Bad Request"，看不到服务器原话
+- 现在：catch 块读 `e.response()?.errorBody()?.string()`，塞进 `ApiException`
+- 错误气泡直接显示 "API 错误：HTTP 429 - {\"error\":{\"code\":\"429\",\"message\":\"余额不足\"}}"
+- OkHttp logging 同步改回 `NONE`（之前临时 BODY 排错， BODY 会 buffer SSE chunk 导致流式假卡顿）
+
+### 改动文件清单（10 个）
+| 文件 | 改动 |
+|---|---|
+| `data/provider/LlmProviderFactory.kt` | BUG-16 cache key + errorBody 修复 + logging 改回 NONE |
+| `data/remote/ChatRemoteDataSource.kt` | 移除 ApiKeyDebug 临时日志 |
+| `ui/chat/ChatViewModel.kt` | BUG-17 + retryMessage() |
+| `ui/chat/ChatScreen.kt` | smart auto-scroll + TimeDivider |
+| `ui/chat/ConversationItem.kt` | 相对时间 formatConversationListTime |
+| `ui/chat/MessageBubble.kt` | RetryButton |
+| `ui/chat/model/ChatMessage.kt` | timestamp 字段 |
+| `ui/chat/model/ChatMessageMapper.kt` | timestamp 透传 |
+| `DEVELOPMENT_LOG.md` | 本文 |
+
+### 调试故事
+排查 401 时一度怀疑 `ApiKeyEncryptor` 多进程 SharedPreferences 不可靠，加了 `ApiKeyDebug` 日志验证 key 解密正常。后续用户报"重启就好"，意识到是内存状态问题——锁定 LRU cache bug（BUG-16）。`ReqDebug` 日志在排查 "It seems like you're looking for a response" 兜底响应时加，最终发现是配置错（已被 BUG-16 修复覆盖）。两个临时日志验证完后已移除。
+
+---
+
 ## v4.0 — 2026-07-26（对话页机制统一重构 + 多 session 并发）
 
 ### 触发原因

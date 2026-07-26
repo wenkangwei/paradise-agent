@@ -305,6 +305,15 @@ class ChatViewModel @Inject constructor(
      */
     fun newChat() {
         messagesObserverJob?.cancel()
+        // CRITICAL: null out the reference after cancel. Job.cancel() only
+        // marks the coroutine as cancelled — the reference itself is still
+        // non-null, which trips the `if (messagesObserverJob == null)`
+        // guard in sendMessage. Result: user sends a message in the fresh
+        // chat, createConversation() assigns a new conversationId, but the
+        // UI never observes that new conversation — so the user's message
+        // and the AI's reply land in Room but never render until the user
+        // manually clicks the new session in the drawer.
+        messagesObserverJob = null
         _uiState.update {
             it.copy(
                 messages = emptyList(),
@@ -378,6 +387,73 @@ class ChatViewModel @Inject constructor(
         }
         viewModelScope.launch {
             runCatching { repository.setMessageReaction(messageId, newValue) }
+        }
+    }
+
+    /**
+     * Re-issue the user prompt that produced a FAILED AI reply. The failed
+     * row is overwritten in place because we pass the same [failedAiMessageId]
+     * back to the streaming service — the UseCase's `appendMessage(aiPlaceholder)`
+     * uses OnConflictStrategy.REPLACE, so the new stream picks up where the
+     * old one died without leaving a stale error bubble in history.
+     *
+     * Look-up happens against the in-memory `uiState.messages` snapshot of
+     * the *current* conversation — no DB round-trip needed. The previous
+     * user message's content and attachments are reused verbatim.
+     */
+    fun retryMessage(failedAiMessageId: String) {
+        val state = _uiState.value
+        val convId = state.currentConversationId ?: return
+        val messages = state.messages
+        val failedIdx = messages.indexOfFirst { it.id == failedAiMessageId }
+        if (failedIdx < 0) return
+        val failedMsg = messages[failedIdx]
+        if (failedMsg.status != MessageStatus.FAILED) return
+
+        // Find the user prompt that triggered this AI reply — walk backwards
+        // from the failed bubble to the most recent USER message.
+        // (ChatMessage.role is the UI-layer enum, distinct from domain.Role.)
+        val prevUser = (failedIdx - 1 downTo 0)
+            .mapNotNull { messages.getOrNull(it) }
+            .firstOrNull { it.role == com.example.aichat.ui.chat.model.Role.USER } ?: return
+
+        // Same concurrency semantics as [sendMessage]: if this conversation
+        // already has a stream in flight (e.g. user retried while another
+        // session's reply is running elsewhere), stop it first.
+        val isCurrentStreaming = convId in state.streamingConversationIds
+        if (isCurrentStreaming) {
+            StreamingService.stop(context, convId)
+        }
+        val activeCount = state.streamingConversationIds.size -
+            (if (isCurrentStreaming) 1 else 0)
+        if (activeCount >= MAX_CONCURRENT_STREAMS) {
+            viewModelScope.launch {
+                _events.emit(
+                    ChatEvent.ShowError(
+                        "同时最多 $MAX_CONCURRENT_STREAMS 个对话进行中，请先停止一个",
+                        null
+                    )
+                )
+            }
+            return
+        }
+
+        _uiState.update { it.copy(isLoading = true, error = null) }
+
+        viewModelScope.launch {
+            try {
+                val attachmentsJson = gson.toJson(prevUser.attachments)
+                StreamingService.start(
+                    context = context,
+                    conversationId = convId,
+                    text = prevUser.content,
+                    attachmentsJson = attachmentsJson,
+                    aiMessageId = failedAiMessageId
+                )
+            } catch (e: Exception) {
+                _events.emit(ChatEvent.ShowError(e.message ?: "重试失败", null))
+                _uiState.update { it.copy(isLoading = false) }
+            }
         }
     }
 
