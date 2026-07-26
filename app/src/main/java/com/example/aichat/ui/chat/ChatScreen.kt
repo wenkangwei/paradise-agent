@@ -50,6 +50,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -71,6 +73,7 @@ import com.example.aichat.ui.chat.toolcard.ToolCardFullScreen
 import com.example.aichat.ui.chat.toolcard.ToolSharer
 import com.example.aichat.ui.chat.toolcard.ToolType
 import com.example.aichat.ui.chat.toolcard.deriveToolTitle
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -141,25 +144,55 @@ fun ChatScreen(
         }
     }
 
-    // Smart auto-scroll: only follow the latest content while the user is
-    // actually parked at the bottom of the list. Once they scroll up to read
-    // history, we stop yanking them back down — otherwise streaming token
-    // growth would pin them to the latest position and prevent reading.
-    // The user re-arms auto-follow by scrolling back to the bottom (or by
-    // tapping the scroll-down FAB).
-    val isAtBottom by remember {
+    // v4.2.2 smart auto-scroll: was previously "if isAtBottom → auto-scroll"
+    // gated with a 2-item tolerance. That tolerance meant scrolling up by 1
+    // item to read history STILL counted as "at bottom" → every new streaming
+    // token yanked the user back to the latest item.
+    //
+    // New design: a sticky `userPinnedToBottom` flag.
+    //   - Starts true (follow the stream).
+    //   - Goes false when the user scrolls UP enough to put a non-last item
+    //     in the *last visible slot* (i.e. they're reading history, not
+    //     watching the tip).
+    //   - Re-arms when the user explicitly returns to the bottom (via FAB
+    //     tap, or by scrolling back until the very last item is the last
+    //     visible one).
+    // This lets the user scroll freely during streaming without being
+    // yanked back, and auto-resumes following once they return.
+    val isStrictAtBottom by remember {
         derivedStateOf {
-            val layoutInfo = listState.layoutInfo
-            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
             val total = uiState.messages.size
-            // Treat "bottom" as: the very last message is visible (allow a
-            // 1-item tolerance because the streaming bubble grows downward
-            // and may briefly push the previous last out of view).
-            total > 0 && lastVisible >= 0 && lastVisible >= total - 2
+            total > 0 && lastVisible == total - 1
         }
     }
-    LaunchedEffect(uiState.messages.lastOrNull()?.content, uiState.messages.size, isAtBottom) {
-        if (uiState.messages.isNotEmpty() && isAtBottom) {
+    var userPinnedToBottom by rememberSaveable { mutableStateOf(true) }
+
+    // Re-arm follow when the user reaches the bottom under their own steam.
+    LaunchedEffect(isStrictAtBottom) {
+        if (isStrictAtBottom) userPinnedToBottom = true
+    }
+    // Disable follow as soon as the last visible item is no longer the tail.
+    LaunchedEffect(listState, uiState.messages.size) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val total = uiState.messages.size
+            if (total == 0) false
+            else lastVisible < total - 1
+        }.distinctUntilChanged().collect { userLeftBottom ->
+            if (userLeftBottom) userPinnedToBottom = false
+        }
+    }
+
+    // Drive auto-scroll from the flag instead of the live isAtBottom.
+    LaunchedEffect(
+        uiState.messages.lastOrNull()?.content,
+        uiState.messages.size,
+        userPinnedToBottom
+    ) {
+        if (uiState.messages.isNotEmpty() && userPinnedToBottom) {
             listState.animateScrollToItem(uiState.messages.lastIndex)
         }
     }
@@ -179,8 +212,16 @@ fun ChatScreen(
     // If the user is about to wait for a streaming reply, remind them once
     // that keeping the app alive while the screen is off works best when the
     // app is excluded from battery optimisations.
+    //
+    // v4.2.3: gate with a session-scoped flag so the snackbar only fires on
+    // the FIRST streaming reply of the user's session — previously it
+    // nagged on every send. The flag is `rememberSaveable` so it survives
+    // configuration changes; it does reset across process death, which is
+    // the right behaviour (next launch = a new session = remind once more).
+    var batteryPromptShownThisSession by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(uiState.isStreaming) {
-        if (uiState.isStreaming) {
+        if (uiState.isStreaming && !batteryPromptShownThisSession) {
+            batteryPromptShownThisSession = true
             val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
             if (!pm.isIgnoringBatteryOptimizations(context.packageName)) {
                 snackbarHostState.showSnackbar(

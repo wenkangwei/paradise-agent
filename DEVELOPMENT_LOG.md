@@ -4,6 +4,113 @@
 
 ---
 
+## v4.2.3 — 2026-07-26（v4.2 系列前端三连修）
+
+承接 v4.2 主版本后的三轮用户反馈迭代（v4.2.1 / v4.2.2 / v4.2.3 合并记录），
+均不涉及数据层变更，仅 UI / 网络重试 / 状态生命周期修复。
+
+### v4.2.1 — AI 回复"去气泡化" + 工具全屏重设计
+1. **AI 回复去掉气泡感**：AI 段落 Surface 改 `Color.Transparent` + 
+   `tonalElevation = 0.dp` + `RoundedCornerShape(0.dp)` + `fillMaxWidth()`。
+   连续 AI 回复读起来是一条连贯流，不再被圆角 + 背景色切割。用户气泡
+   保留 320dp 上限 + 着色 Surface。
+2. **工具全屏页重设计**（首版）：
+   - `ModalBottomSheet` 改为 `androidx.compose.ui.window.Dialog` +
+     `DialogProperties(usePlatformDefaultWidth = false)`。原因：M3
+     BottomSheet 的 `nestedScroll` 吞掉了 WebView 上下拖的手势，
+     页面表现为"滚不动"。
+   - 滑动切换控件（`SlidingSegmentedControl`）替代原 FilterChip：
+     `animateFloatAsState` 驱动 pill 滑动；`BoxWithConstraints` 拿到
+     `maxWidth / 2` 算偏移。
+3. **HtmlCard / ToolCardFullScreen 升级 WebView 配置**：
+   `javaScriptEnabled`、`domStorageEnabled`、`useWideViewPort`、
+   `loadWithOverviewMode`、`builtInZoomControls` —— 让 React/Vue/
+   alpine.js 类页面 + 宽表格 + SVG 正常渲染。
+
+### v4.2.2 — 网络韧性 + 滚动 + 思考流粘顶 + 文本选择
+1. **SSE 流重试**（`LlmProviderFactory.OpenAiCompatibleProvider.stream`）：
+   - `IOException` 时按 `[1s, 2s, 4s]` 退避重试 3 次；
+   - **关键约束**：`hasEmittedAnyDelta` 一旦为 true（已向 UI 推过
+     `ContentDelta` 或 `ReasoningDelta`）就不再重试——重试会重开请求、
+     重新生成 token，导致气泡里出现重复内容。已显示部分时直接
+     `return@flow`，让 UseCase 把当前部分内容 finalize 成
+     `INTERRUPTED`，比抛错弹出错误气泡友好。
+   - 解决用户反馈"切应用 / 锁屏再回来 → 'software caused connection
+     abort'，整条回复丢失"。
+2. **HTML 预览滚动**：`HtmlCard`、`ToolCardFullScreen.HtmlPreview`
+   全部加 `pointerInteropFilter { false }`（Compose 1.6.x 实验性 API
+   → `@OptIn(ExperimentalComposeUiApi::class)`）—— 把触摸事件从
+   Compose 手势系统透传给 WebView。配合 WebView 自身的
+   `isScrollContainer = true` + `overScrollMode = ALWAYS`。
+3. **对话页严格"用户贴底"才自动滚**（`ChatScreen`）：
+   - 之前用"可见项数 ≤ 2 即视为在底部"的容差，结果是用户上滑读历史
+     时新 token 一到又被拽回来。
+   - 改为 `snapshotFlow { listState.firstVisibleItemIndex }.distinctUntilChanged()`
+     + `userPinnedToBottom` 标志：只有用户**当前贴在底部**才自动滚；
+     一旦上滑就把自动滚关掉，用户主动滑回底部才重新启用。
+4. **思考过程粘顶 + 内部自滚**（`ReasoningSection`）：
+   - 折叠展开体高度 `heightIn(max = 240.dp)` + 独立 `rememberScrollState`，
+     长思维链不会把答案挤出首屏；
+   - `LaunchedEffect(reasoning, isStreaming, expanded)` 在展开 +
+     streaming 时调用 `reasoningScroll.animateScrollTo(maxValue)`，
+     像日志一样自动跟随最新一行；header 永远粘在卡片顶部。
+5. **气泡文本部分选择**：用户/AI 文本全部包进 `SelectionContainer`，
+   原生拖拽手柄支持任意 span 选择复制。旧的 DropdownMenu 里
+   "复制" / "全选并复制" 删除（与 SelectionContainer 提供的系统
+   菜单功能重复）。
+
+### v4.2.3 — 工具全屏"浏览器感" + 反馈行补全 + 电池提醒去重
+1. **ReactionRow 补齐分享**（`MessageBubble`）：
+   - `ReactionRow` 签名加 `onCopyAll` / `onShare`；底部行从
+     `[👍 👎]` 扩展为 `[👍 👎 📋 🔄]`（点赞 / 点踩 / 复制全文 / 分享）；
+   - "复制全文" = `LocalClipboardManager.setText(AnnotatedString(message.content))`；
+   - "分享" = `ACTION_SEND` + `Intent.createChooser`，与 DropdownMenu
+     的"分享"项一致（用户希望 AI 回复底部也能直接分享，不必走长按）。
+2. **工具全屏"浏览器感"重做**（`ToolCardFullScreen`）：
+   - **去掉标题**：`TopAppBar(title = {})`，所有控件塞进单行
+     `actions`：`[✕ 关闭]  [预览/代码 滑动切换]  [⭐]  [📋]  [↗]`。
+   - **滑动切换缩成 130×30dp**（原 180×34）：与三个 IconButton 并排
+     不挤；`RoundedCornerShape(15.dp)` pill。
+   - **标签颜色与 pill 同步动画**（修 v4.2.1 遗留 bug）：之前文字
+     颜色立即翻转、pill 200ms 后才滑到位，看起来像"颜色和位置不同步"。
+     用 `animateColorAsState` + `spring(StiffnessMedium)` 让颜色与
+     pill `animateFloatAsState` 在同一感知速度过渡。
+   - **WebView 触摸穿透 + 滚动启用**：`HtmlPreview` 的 AndroidView
+     modifier `.pointerInteropFilter { false }`（Compose 不再吞手势），
+     factory 内显式 `isVerticalScrollBarEnabled = true` /
+     `isHorizontalScrollBarEnabled = true` / `isScrollContainer = true` /
+     `overScrollMode = View.OVER_SCROLL_ALWAYS`。现在 HTML 预览可
+     上下、左右滑动，与系统浏览器一致。
+3. **电池优化提醒每会话只弹一次**（`ChatScreen`）：
+   - 原实现每次发消息都查 `PowerManager.isIgnoringBatteryOptimizations`
+     并弹 Snackbar，造成"每发一次都催一次"。
+   - 改为 `var batteryPromptShownThisSession by rememberSaveable { mutableStateOf(false) }`
+     做一次性门闩。`rememberSaveable` 而非 `remember` 是为了让屏幕
+     旋转 / 进程被回收恢复后**不会重新弹**（同一会话上下文）。
+
+### 触及文件
+| 文件 | v4.2.1 | v4.2.2 | v4.2.3 |
+| --- | --- | --- | --- |
+| `MessageBubble.kt` | AI Surface 去气泡 | 包 `SelectionContainer` | ReactionRow 加 📋 / ↗ |
+| `ToolCardFullScreen.kt` | M3 Sheet→Dialog | — | 标题去除 / 切换缩 130×30 / WebView 触摸穿透 |
+| `HtmlCard.kt` | WebView 升级 | 触摸穿透 | — |
+| `ReasoningSection.kt` | — | 240dp 内部滚 + 粘顶 | — |
+| `ChatScreen.kt` | — | `userPinnedToBottom` 严格贴底 | 电池提醒 `rememberSaveable` 去重 |
+| `LlmProviderFactory.kt` | — | SSE 3 次退避重试 | — |
+
+### 输出
+`/mnt/c/Users/wenka/Desktop/aichat-debug-v4.2.3.apk`（18 MB）
+
+### 待办
+- Markdown 全屏预览仍是 monospace 源码 fallback（未引入 commonmark-java）。
+- ReactionRow 没有"选中态"持久化（应该走 `message.metadata.reaction`，
+  当前已经接通 `onReact`，但 UI 端 isSelected 仍是临时状态）。
+- WebView 的 `forceDark = FORCE_DARK_OFF` 在 Android 14+ 已废弃，
+  要切到 `WebSettingsCompat.setForceDarkImplementationStrategy` +
+  `AlgorithmicDarkeningStrategy`。
+
+---
+
 ## v4.2 — 2026-07-26（工具卡片：拆分 / 收藏 / 分享 / 全屏）
 
 ### 触发原因

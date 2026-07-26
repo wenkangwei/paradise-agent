@@ -110,15 +110,25 @@ fun HtmlCard(
                         webViewClient = WebViewClient()
                         webChromeClient = WebChromeClient()
                         settings.apply {
-                            javaScriptEnabled = false
-                            domStorageEnabled = false
-                            cacheMode = WebSettings.LOAD_NO_CACHE
+                            // v4.2.1: match ToolCardFullScreen.HtmlPreview so an
+                            // inline HTML card and its fullscreen counterpart
+                            // render identically. JS/domStorage on for SPA pages,
+                            // wide viewport + overview for proper layout.
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            databaseEnabled = true
+                            cacheMode = WebSettings.LOAD_DEFAULT
                             setSupportZoom(true)
                             builtInZoomControls = true
                             displayZoomControls = false
+                            useWideViewPort = true
+                            loadWithOverviewMode = true
+                            defaultTextEncodingName = "UTF-8"
+                            allowFileAccess = false
+                            allowContentAccess = false
                         }
                         loadDataWithBaseURL(
-                            null,
+                            "about:blank",
                             html,
                             "text/html",
                             "UTF-8",

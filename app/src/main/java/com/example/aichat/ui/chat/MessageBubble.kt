@@ -10,6 +10,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,7 +24,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.ThumbDown
 import androidx.compose.material.icons.filled.ThumbUp
@@ -109,6 +109,12 @@ fun MessageBubble(
     val clipboard = LocalClipboardManager.current
     var showMenu by remember { mutableStateOf(false) }
 
+    // v4.2.1: AI replies are flat (no bubble background / no tonal elevation /
+    // no max-width) so consecutive AI messages read as one coherent stream.
+    // User bubbles keep their tinted surface + 320dp max width.
+    val aiFlatColor = Color.Transparent
+    val aiTonal = 0.dp
+
     Box(
         modifier = modifier.fillMaxWidth(),
         contentAlignment = alignment
@@ -152,11 +158,11 @@ fun MessageBubble(
                 // 2) Text bubble (or streaming cursor placeholder)
                 if (message.content.isNotBlank() || (message.isStreaming && message.attachments.isEmpty())) {
                     Surface(
-                        shape = bubbleShape,
-                        color = if (isUser) chatColors.userBubbleColor else chatColors.aiBubbleColor,
-                        tonalElevation = if (isUser) 2.dp else 1.dp,
+                        shape = if (isUser) bubbleShape else RoundedCornerShape(0.dp),
+                        color = if (isUser) chatColors.userBubbleColor else aiFlatColor,
+                        tonalElevation = if (isUser) 2.dp else aiTonal,
                         modifier = Modifier
-                            .widthIn(max = 320.dp)
+                            .widthIn(max = if (isUser) 320.dp else 9999.dp)
                             .combinedClickable(
                                 enabled = !message.isStreaming,
                                 onClick = {},
@@ -185,21 +191,30 @@ fun MessageBubble(
 
                             if (message.content.isNotBlank()) {
                                 if (isUser) {
-                                    Text(
-                                        text = message.content,
-                                        color = chatColors.onUserBubbleColor,
-                                        style = MaterialTheme.typography.bodyMedium
-                                    )
+                                    SelectionContainer {
+                                        Text(
+                                            text = message.content,
+                                            color = chatColors.onUserBubbleColor,
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    }
                                 } else if (!message.isStreaming && looksLikeHtmlPage(message.content)) {
                                     // Complete HTML page - render as an embedded WebView card
                                     HtmlCard(html = message.content)
                                 } else {
-                                    MarkdownText(
-                                        text = message.content,
-                                        style = MaterialTheme.typography.bodyMedium.copy(
-                                            color = chatColors.onAiBubbleColor
+                                    // SelectionContainer enables native text-selection
+                                    // handles so the user can copy arbitrary spans
+                                    // (long-press → drag handles). The legacy
+                                    // "复制" menu item was removed in favor of this;
+                                    // "分享" remains as a quick-share-whole-bubble.
+                                    SelectionContainer {
+                                        MarkdownText(
+                                            text = message.content,
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                color = chatColors.onAiBubbleColor
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             }
 
@@ -215,7 +230,19 @@ fun MessageBubble(
                                 Spacer(Modifier.height(6.dp))
                                 ReactionRow(
                                     reaction = message.reaction,
-                                    onReact = onReact
+                                    onReact = onReact,
+                                    onCopyAll = {
+                                        clipboard.setText(AnnotatedString(message.content))
+                                    },
+                                    onShare = {
+                                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/plain"
+                                            putExtra(Intent.EXTRA_TEXT, message.content)
+                                        }
+                                        runCatching {
+                                            context.startActivity(Intent.createChooser(shareIntent, null))
+                                        }
+                                    }
                                 )
                             }
 
@@ -236,10 +263,10 @@ fun MessageBubble(
                 // segment.
                 if (!isUser && !message.reasoningContent.isNullOrBlank()) {
                     Surface(
-                        shape = bubbleShape,
-                        color = chatColors.aiBubbleColor,
-                        tonalElevation = 1.dp,
-                        modifier = Modifier.widthIn(max = 320.dp)
+                        shape = RoundedCornerShape(0.dp),
+                        color = aiFlatColor,
+                        tonalElevation = aiTonal,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                             ReasoningSection(
@@ -252,10 +279,10 @@ fun MessageBubble(
                 if (!isUser) {
                     message.metadata?.searchResults?.takeIf { it.isNotEmpty() }?.let { results ->
                         Surface(
-                            shape = bubbleShape,
-                            color = chatColors.aiBubbleColor,
-                            tonalElevation = 1.dp,
-                            modifier = Modifier.widthIn(max = 320.dp)
+                            shape = RoundedCornerShape(0.dp),
+                            color = aiFlatColor,
+                            tonalElevation = aiTonal,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                                 SearchResultsSection(results = results)
@@ -268,11 +295,11 @@ fun MessageBubble(
                     when (segment) {
                         is CardSegment.Text -> {
                             Surface(
-                                shape = bubbleShape,
-                                color = chatColors.aiBubbleColor,
-                                tonalElevation = 1.dp,
+                                shape = RoundedCornerShape(0.dp),
+                                color = aiFlatColor,
+                                tonalElevation = aiTonal,
                                 modifier = Modifier
-                                    .widthIn(max = 320.dp)
+                                    .fillMaxWidth()
                                     .combinedClickable(
                                         enabled = true,
                                         onClick = {},
@@ -282,12 +309,14 @@ fun MessageBubble(
                                 Column(
                                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                                 ) {
-                                    MarkdownText(
-                                        text = segment.markdown,
-                                        style = MaterialTheme.typography.bodyMedium.copy(
-                                            color = chatColors.onAiBubbleColor
+                                    SelectionContainer {
+                                        MarkdownText(
+                                            text = segment.markdown,
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                color = chatColors.onAiBubbleColor
+                                            )
                                         )
-                                    )
+                                    }
                                     // Streaming cursor only on the last text segment
                                     // (mirrors the single-bubble behaviour above).
                                     if (idx == segments.lastIndex &&
@@ -302,7 +331,22 @@ fun MessageBubble(
                                         !message.isStreaming && message.content.isNotBlank()
                                     ) {
                                         Spacer(Modifier.height(6.dp))
-                                        ReactionRow(reaction = message.reaction, onReact = onReact)
+                                        ReactionRow(
+                                            reaction = message.reaction,
+                                            onReact = onReact,
+                                            onCopyAll = {
+                                                clipboard.setText(AnnotatedString(message.content))
+                                            },
+                                            onShare = {
+                                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "text/plain"
+                                                    putExtra(Intent.EXTRA_TEXT, message.content)
+                                                }
+                                                runCatching {
+                                                    context.startActivity(Intent.createChooser(shareIntent, null))
+                                                }
+                                            }
+                                        )
                                     }
                                     if (idx == segments.lastIndex && message.status == MessageStatus.FAILED) {
                                         Spacer(Modifier.height(8.dp))
@@ -331,10 +375,10 @@ fun MessageBubble(
                 // content yet (e.g. thinking model cold start).
                 if (message.isStreaming && message.content.isBlank() && message.reasoningContent.isNullOrBlank()) {
                     Surface(
-                        shape = bubbleShape,
-                        color = chatColors.aiBubbleColor,
-                        tonalElevation = 1.dp,
-                        modifier = Modifier.widthIn(max = 320.dp)
+                        shape = RoundedCornerShape(0.dp),
+                        color = aiFlatColor,
+                        tonalElevation = aiTonal,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                             StreamingPlaceholder(color = chatColors.onAiBubbleColor)
@@ -344,27 +388,14 @@ fun MessageBubble(
             }
         }
 
-        // Long-press context menu (anchored to the outer Box)
+        // Long-press context menu (anchored to the outer Box).
+        // Note: "复制" / "全选并复制" removed — text is now wrapped in
+        // SelectionContainer, which gives native drag-handles for partial
+        // copying. Only "分享" stays as a quick share-the-whole-bubble action.
         DropdownMenu(
             expanded = showMenu,
             onDismissRequest = { showMenu = false }
         ) {
-            DropdownMenuItem(
-                text = { Text("复制") },
-                leadingIcon = { Icon(Icons.Filled.ContentCopy, contentDescription = null) },
-                onClick = {
-                    clipboard.setText(AnnotatedString(message.content))
-                    showMenu = false
-                }
-            )
-            DropdownMenuItem(
-                text = { Text("全选并复制") },
-                leadingIcon = { Icon(Icons.Filled.SelectAll, contentDescription = null) },
-                onClick = {
-                    clipboard.setText(AnnotatedString(message.content))
-                    showMenu = false
-                }
-            )
             DropdownMenuItem(
                 text = { Text("分享") },
                 leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },
@@ -386,7 +417,9 @@ fun MessageBubble(
 @Composable
 private fun ReactionRow(
     reaction: String?,
-    onReact: (String) -> Unit
+    onReact: (String) -> Unit,
+    onCopyAll: () -> Unit = {},
+    onShare: () -> Unit = {}
 ) {
     Row(
         horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -403,6 +436,18 @@ private fun ReactionRow(
             contentDescription = "点踩",
             isSelected = reaction == "dislike",
             onClick = { onReact("dislike") }
+        )
+        ReactionIcon(
+            icon = Icons.Filled.ContentCopy,
+            contentDescription = "复制全文",
+            isSelected = false,
+            onClick = onCopyAll
+        )
+        ReactionIcon(
+            icon = Icons.Filled.Share,
+            contentDescription = "分享",
+            isSelected = false,
+            onClick = onShare
         )
     }
 }

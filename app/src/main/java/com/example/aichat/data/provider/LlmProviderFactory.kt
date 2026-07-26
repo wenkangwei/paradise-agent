@@ -11,6 +11,7 @@ import com.example.aichat.data.remote.dto.ImageUrlData
 import com.example.aichat.data.remote.dto.MessageDto
 import com.example.aichat.domain.model.Message
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -107,24 +108,75 @@ private class OpenAiCompatibleProvider(
             stream = true
         )
 
-        val responseBody = try {
-            apiService.streamChat(endpointPath, request)
-        } catch (e: HttpException) {
-            // Read the server's actual error body — Retrofit's HttpException.message()
-            // is just "HTTP 400 Bad Request", which is useless for diagnosing
-            // auth/quota/schema errors. The real reason ("messages field is
-            // required", "Rate limit exceeded", "令牌已过期", ...) lives here.
-            val raw = runCatching { e.response()?.errorBody()?.string() }.getOrNull()
-            throw com.example.aichat.data.remote.ApiException(
-                "API error: HTTP ${e.code()} - ${raw ?: e.message()}", e
-            )
-        } catch (e: IOException) {
-            throw com.example.aichat.data.remote.NetworkException(
-                "Network error: ${e.message}", e
-            )
-        }
+        // v4.2.2: retry on transient IOException ("software caused connection
+        // abort", "connection reset", network handoff, …). Crucially, retry
+        // is gated on `!hasEmittedAnyDelta` — once the model has produced
+        // content, restarting the request would re-generate from scratch
+        // and produce duplicate text in the bubble. In that case we just
+        // end the stream and let the UseCase finalize with what we have.
+        //
+        // Typical scenario this rescues: user switches apps / locks screen
+        // during the model's "thinking" phase before the first token lands.
+        // The :streaming process's foreground service keeps the process
+        // alive but the socket still dies on aggressive OEM ROMs — retry
+        // opens a fresh socket and usually succeeds.
+        var hasEmittedAnyDelta = false
+        var attempt = 0
+        while (true) {
+            val responseBody = try {
+                apiService.streamChat(endpointPath, request)
+            } catch (e: HttpException) {
+                // Read the server's actual error body — Retrofit's HttpException.message()
+                // is just "HTTP 400 Bad Request", which is useless for diagnosing
+                // auth/quota/schema errors. The real reason ("messages field is
+                // required", "Rate limit exceeded", "令牌已过期", ...) lives here.
+                val raw = runCatching { e.response()?.errorBody()?.string() }.getOrNull()
+                throw com.example.aichat.data.remote.ApiException(
+                    "API error: HTTP ${e.code()} - ${raw ?: e.message()}", e
+                )
+            } catch (e: IOException) {
+                // Pre-stream IOException (couldn't even establish connection):
+                // retry up to MAX_STREAM_RETRY times with exponential backoff.
+                attempt++
+                if (attempt > MAX_STREAM_RETRY) {
+                    throw com.example.aichat.data.remote.NetworkException(
+                        "网络错误：${e.message}（已重试 $MAX_STREAM_RETRY 次）", e
+                    )
+                }
+                delay(RETRY_BACKOFF_MS[attempt - 1])
+                continue
+            }
 
-        streamClient.toEventFlow(responseBody).collect { emit(it) }
+            try {
+                streamClient.toEventFlow(responseBody).collect { event ->
+                    emit(event)
+                    if (event is StreamEvent.ContentDelta ||
+                        event is StreamEvent.ReasoningDelta) {
+                        hasEmittedAnyDelta = true
+                    }
+                }
+                // Stream completed normally.
+                return@flow
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Cooperative cancellation — propagate, don't retry.
+                throw e
+            } catch (e: IOException) {
+                // Mid-stream IOException. If we've already shown content, end
+                // gracefully so the UseCase finalizes partial content as
+                // INTERRUPTED rather than throwing + showing an error bubble.
+                if (hasEmittedAnyDelta) {
+                    return@flow
+                }
+                attempt++
+                if (attempt > MAX_STREAM_RETRY) {
+                    throw com.example.aichat.data.remote.NetworkException(
+                        "网络错误：${e.message}（已重试 $MAX_STREAM_RETRY 次）", e
+                    )
+                }
+                delay(RETRY_BACKOFF_MS[attempt - 1])
+                // Loop back to re-issue the request.
+            }
+        }
     }.flowOn(Dispatchers.IO)
 
     /**
@@ -206,6 +258,13 @@ private class OpenAiCompatibleProvider(
             keepAliveDuration = 5,
             TimeUnit.MINUTES
         )
+
+        /**
+         * SSE retry config — applied per-stream, only while no content has
+         * been emitted yet (see stream() doc for rationale).
+         */
+        private const val MAX_STREAM_RETRY = 3
+        private val RETRY_BACKOFF_MS = longArrayOf(1_000L, 2_000L, 4_000L)
     }
 
     private fun Message.toDto(): MessageDto = MessageDto(

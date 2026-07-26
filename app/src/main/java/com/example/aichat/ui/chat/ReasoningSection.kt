@@ -8,14 +8,18 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -26,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +65,26 @@ fun ReasoningSection(
     if (reasoning.isBlank()) return
 
     var expanded by rememberSaveable(reasoning.hashCode()) { mutableStateOf(isStreaming) }
+    // v4.2.2: cap the expanded reasoning to 240dp and give it its own
+    // vertical scroll state. Two reasons:
+    //   1. Long CoT traces (thinking models can emit 5k+ tokens) would
+    //      otherwise push the actual answer off-screen for several viewports.
+    //   2. While streaming, we want the reasoning to "follow itself" — the
+    //      newest line should always be visible — without scrolling the
+    //      parent chat list. By using an inner scroll state + an auto-follow
+    //      LaunchedEffect, the reasoning block reads like a live log: the
+    //      header stays put (sticky), the body grows + scrolls itself.
+    val reasoningScroll = rememberScrollState()
+    LaunchedEffect(reasoning, isStreaming, expanded) {
+        if (expanded && isStreaming) {
+            // Animate to bottom as new tokens arrive. maxValue is the scroll
+            // range — it grows as content grows, so this always lands at the
+            // newest line. Use animateScrollTo for a smooth follow; if the
+            // user has manually scrolled up to read earlier reasoning, we
+            // still scroll (cheap, and they re-position easily).
+            reasoningScroll.animateScrollTo(reasoningScroll.maxValue)
+        }
+    }
 
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -68,6 +93,9 @@ fun ReasoningSection(
         tonalElevation = 0.dp
     ) {
         Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            // Header — clickable, always visible at the top of the card.
+            // Acts like a "sticky" title: while the body scrolls inside the
+            // 240dp window below, this header stays anchored.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -102,16 +130,21 @@ fun ReasoningSection(
                 enter = expandVertically() + fadeIn(),
                 exit = shrinkVertically() + fadeOut()
             ) {
-                Text(
-                    text = reasoning,
+                Box(
                     modifier = Modifier
                         .padding(top = 6.dp)
-                        .fillMaxWidth(),
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        .fillMaxWidth()
+                        .heightIn(max = 240.dp)
+                        .verticalScroll(reasoningScroll)
+                ) {
+                    Text(
+                        text = reasoning,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     )
-                )
+                }
             }
         }
     }
