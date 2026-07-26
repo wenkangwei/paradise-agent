@@ -388,14 +388,54 @@ fun MessageBubble(
             }
         }
 
-        // Long-press context menu (anchored to the outer Box).
-        // Note: "复制" / "全选并复制" removed — text is now wrapped in
-        // SelectionContainer, which gives native drag-handles for partial
-        // copying. Only "分享" stays as a quick share-the-whole-bubble action.
+        // Long-press context menu — v4.2.4 expanded to a full action set.
+        //
+        // The user's request was to have 点赞 / 点踩 / 复制 / 分享 available
+        // in the popup that appears after selecting text. The native
+        // SelectionContainer popup in Compose 1.6.x is provided by the
+        // platform and only shows Copy / Select All — it isn't customisable
+        // without upgrading to Compose 1.7+ (textContextMenuItem API).
+        //
+        // As a working substitute, this long-press menu carries the full
+        // action set. Combined with the always-visible reaction row under
+        // AI bubbles, the user has one-tap access to every action without
+        // depending on the system selection popup.
         DropdownMenu(
             expanded = showMenu,
             onDismissRequest = { showMenu = false }
         ) {
+            if (!isUser) {
+                DropdownMenuItem(
+                    text = {
+                        Text(if (message.reaction == "like") "取消点赞" else "点赞")
+                    },
+                    leadingIcon = { Icon(Icons.Filled.ThumbUp, contentDescription = null) },
+                    onClick = {
+                        // setMessageReaction toggles: if already liked → null,
+                        // otherwise → "like". A single call flips the state.
+                        onReact("like")
+                        showMenu = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = {
+                        Text(if (message.reaction == "dislike") "取消点踩" else "点踩")
+                    },
+                    leadingIcon = { Icon(Icons.Filled.ThumbDown, contentDescription = null) },
+                    onClick = {
+                        onReact("dislike")
+                        showMenu = false
+                    }
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("复制全文") },
+                leadingIcon = { Icon(Icons.Filled.ContentCopy, contentDescription = null) },
+                onClick = {
+                    clipboard.setText(AnnotatedString(message.content))
+                    showMenu = false
+                }
+            )
             DropdownMenuItem(
                 text = { Text("分享") },
                 leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },

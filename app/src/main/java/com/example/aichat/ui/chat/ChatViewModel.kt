@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.aichat.data.local.LastConversationTracker
 import com.example.aichat.data.remote.AttachmentEncoder
 import com.example.aichat.data.repository.FavoriteTool
 import com.example.aichat.data.repository.FavoriteToolRepository
@@ -31,6 +32,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -63,6 +65,7 @@ class ChatViewModel @Inject constructor(
     private val repository: ChatRepository,
     private val apiProfileRepo: com.example.aichat.data.repository.ApiProfileRepository,
     private val favoriteToolRepo: FavoriteToolRepository,
+    private val lastConversationTracker: LastConversationTracker,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
@@ -83,11 +86,48 @@ class ChatViewModel @Inject constructor(
         // One-time sweep of STREAMING rows orphaned by a previous :streaming
         // process that died mid-stream (app crashed, OEM killed, reboot).
         // Without this the drawer would show a green dot forever on dead
-        // sessions. Run on first ViewModel init, not Application.onCreate,
-        // so it only fires when the user actually opens the chat screen
-        // (and only in the main process — not the :streaming process).
+        // sessions.
+        //
+        // v4.2.4: DEFER the sweep by 5 seconds. When the user locks the
+        // screen and Android kills the main process, the :streaming process
+        // often keeps running and writes STREAMING rows every 150ms. An
+        // immediate sweep on the next ViewModel init races with the writer
+        // and incorrectly marks a still-active stream as INTERRUPTED — the
+        // user sees the reply freeze mid-stream when they reopen the app.
+        // Five seconds is long enough to ride out a normal screen-lock /
+        // unlock cycle while still recovering truly orphaned rows.
         viewModelScope.launch {
+            kotlinx.coroutines.delay(SESSION_SWEEP_DELAY_MS)
             runCatching { repository.markDanglingStreamingInterrupted("session_init") }
+        }
+        // v4.2.4: restore the conversation the user last had open so that
+        // an Activity / process recreation (config change, OEM kill, return
+        // from lock screen) doesn't dump them into the empty state.
+        restoreLastConversation()
+    }
+
+    /**
+     * Resumes the last-open conversation if one is recorded in
+     * [LastConversationTracker] and still exists in the database.
+     *
+     * This is the single fix for the "AI reply disappeared after lock
+     * screen" complaint: the reply was in Room the whole time, but the
+     * fresh ViewModel had no `currentConversationId` to observe.
+     */
+    private fun restoreLastConversation() {
+        val lastId = lastConversationTracker.load() ?: return
+        viewModelScope.launch {
+            // Wait for the first conversation-list emission so we can
+            // verify `lastId` still refers to an existing conversation
+            // (it may have been deleted while the main process was dead).
+            val exists = runCatching { repository.observeConversations().first() }
+                .getOrNull()
+                ?.any { it.id == lastId } == true
+            if (exists) {
+                selectConversation(lastId)
+            } else {
+                lastConversationTracker.clear()
+            }
         }
     }
 
@@ -296,6 +336,7 @@ class ChatViewModel @Inject constructor(
                 val conversationId = _uiState.value.currentConversationId
                     ?: repository.createConversation().also { newId ->
                         _uiState.update { it.copy(currentConversationId = newId) }
+                        lastConversationTracker.save(newId)
                     }
                 // Make sure we're observing this conversation so the
                 // :streaming process's writes are reflected in the UI.
@@ -401,6 +442,7 @@ class ChatViewModel @Inject constructor(
         // and the AI's reply land in Room but never render until the user
         // manually clicks the new session in the drawer.
         messagesObserverJob = null
+        lastConversationTracker.clear()
         _uiState.update {
             it.copy(
                 messages = emptyList(),
@@ -442,6 +484,7 @@ class ChatViewModel @Inject constructor(
             )
         }
         observeMessages(conversationId)
+        lastConversationTracker.save(conversationId)
     }
 
     fun deleteConversation(conversationId: String) {
@@ -568,5 +611,12 @@ class ChatViewModel @Inject constructor(
          *     the user really needs more they can stop one.
          */
         const val MAX_CONCURRENT_STREAMS = 5
+
+        /**
+         * Delay before the init-time dangling-streaming sweep fires.
+         * See [init] doc for the rationale (avoid racing the :streaming
+         * process after a lock-screen / process-restart cycle).
+         */
+        const val SESSION_SWEEP_DELAY_MS = 5_000L
     }
 }

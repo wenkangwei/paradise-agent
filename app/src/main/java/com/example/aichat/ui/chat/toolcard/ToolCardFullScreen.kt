@@ -298,6 +298,13 @@ private fun PreviewView(content: String, type: ToolType) {
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun HtmlPreview(content: String) {
+    // v4.2.4: inject viewport meta so the page lays out at device width
+    // instead of being zoomed out to fit a default 980px CSS viewport.
+    // This is the single fix that makes the preview behave like a real
+    // mobile browser — page scrolls vertically through real content,
+    // not a zoomed-out overview.
+    val processedHtml = remember(content) { HtmlViewport.ensureMobileViewport(content) }
+
     // Browser-grade WebView config: JS + DOM storage on so React/Vue/alpine
     // pages render correctly; wide viewport + overview mode so the page lays
     // out at the device width instead of forcing 980px default viewport;
@@ -348,7 +355,11 @@ private fun HtmlPreview(content: String) {
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                     settings.forceDark = WebSettings.FORCE_DARK_OFF
                 }
-                loadDataWithBaseURL("about:blank", content, "text/html", "UTF-8", null)
+                // Initial scale 100% — explicit so an injected viewport
+                // meta tag doesn't get overridden by overview mode's fit-zoom
+                // when the page is wider than device width.
+                setInitialScale(100)
+                loadDataWithBaseURL("about:blank", processedHtml, "text/html", "UTF-8", null)
             }
         },
         modifier = Modifier

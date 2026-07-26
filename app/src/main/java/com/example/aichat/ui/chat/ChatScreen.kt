@@ -144,27 +144,28 @@ fun ChatScreen(
         }
     }
 
-    // v4.2.2 smart auto-scroll: was previously "if isAtBottom → auto-scroll"
-    // gated with a 2-item tolerance. That tolerance meant scrolling up by 1
-    // item to read history STILL counted as "at bottom" → every new streaming
-    // token yanked the user back to the latest item.
+    // v4.2.4 smart auto-scroll: rewritten to fix the recurring "user
+    // scrolled up but got yanked back during streaming" complaint.
     //
-    // New design: a sticky `userPinnedToBottom` flag.
-    //   - Starts true (follow the stream).
-    //   - Goes false when the user scrolls UP enough to put a non-last item
-    //     in the *last visible slot* (i.e. they're reading history, not
-    //     watching the tip).
-    //   - Re-arms when the user explicitly returns to the bottom (via FAB
-    //     tap, or by scrolling back until the very last item is the last
-    //     visible one).
-    // This lets the user scroll freely during streaming without being
-    // yanked back, and auto-resumes following once they return.
+    // Root cause of the previous bug: `isStrictAtBottom` only checked that
+    // the *index* of the last visible item was the last item. That's true
+    // even when 99% of the last item is off-screen — so the moment a new
+    // token grew the streaming bubble past the viewport, the user's "scroll
+    // up by one screen" still reported `isStrictAtBottom = true` because
+    // the very tail of the streaming bubble was peeking into view at the
+    // bottom edge. The follow flag stayed armed → auto-scroll yanked back.
+    //
+    // New check: the LAST item's bottom edge must actually be within the
+    // viewport (with a small tolerance for the keyboard inset / overscroll
+    // glow). Only then is the user really "at the bottom".
     val isStrictAtBottom by remember {
         derivedStateOf {
             val info = listState.layoutInfo
-            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
             val total = uiState.messages.size
-            total > 0 && lastVisible == total - 1
+            if (total == 0) return@derivedStateOf true
+            val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf false
+            last.index == total - 1 &&
+                last.offset + last.size <= info.viewportEndOffset + BOTTOM_TOLERANCE_PX
         }
     }
     var userPinnedToBottom by rememberSaveable { mutableStateOf(true) }
@@ -173,17 +174,15 @@ fun ChatScreen(
     LaunchedEffect(isStrictAtBottom) {
         if (isStrictAtBottom) userPinnedToBottom = true
     }
-    // Disable follow as soon as the last visible item is no longer the tail.
+    // Disable follow as soon as the user is NOT strictly at the bottom.
+    // snapshotFlow + distinctUntilChanged avoids re-firing on every pixel
+    // of intermediate scroll.
     LaunchedEffect(listState, uiState.messages.size) {
-        snapshotFlow {
-            val info = listState.layoutInfo
-            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            val total = uiState.messages.size
-            if (total == 0) false
-            else lastVisible < total - 1
-        }.distinctUntilChanged().collect { userLeftBottom ->
-            if (userLeftBottom) userPinnedToBottom = false
-        }
+        snapshotFlow { isStrictAtBottom }
+            .distinctUntilChanged()
+            .collect { atBottom ->
+                if (!atBottom) userPinnedToBottom = false
+            }
     }
 
     // Drive auto-scroll from the flag instead of the live isAtBottom.
@@ -193,6 +192,12 @@ fun ChatScreen(
         userPinnedToBottom
     ) {
         if (uiState.messages.isNotEmpty() && userPinnedToBottom) {
+            // animateScrollToItem with no offset scrolls the item to the
+            // top of the viewport. For the last item, this naturally pins
+            // it to the top — which is what we want when content is long
+            // enough to push earlier messages off-screen. When the last
+            // item is short, the LazyColumn shows it at the bottom of the
+            // list area anyway (no scroll needed beyond the end).
             listState.animateScrollToItem(uiState.messages.lastIndex)
         }
     }
@@ -720,3 +725,12 @@ private fun formatChatDividerTime(timestamp: Long): String {
 
 /** Minimum gap between adjacent messages to merit a time divider. */
 private const val FIVE_MINUTES_MS = 5L * 60 * 1000
+
+/**
+ * Pixel tolerance for the "user is at the bottom" check in [ChatScreen].
+ * Anything within this distance from the viewport's bottom edge counts
+ * as "at bottom" — absorbs the LazyColumn's overscroll glow, navigation
+ * bar inset, and small floating-button overlap without classifying the
+ * user as "scrolled away".
+ */
+private const val BOTTOM_TOLERANCE_PX = 96

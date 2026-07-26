@@ -25,11 +25,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.aichat.ui.chat.toolcard.HtmlViewport
 
 /**
  * Detects whether an AI reply looks like a complete HTML page rather than a
@@ -61,6 +63,9 @@ fun HtmlCard(
     modifier: Modifier = Modifier
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    // v4.2.4: inject viewport meta so the page lays out at device width
+    // instead of being zoomed out to fit a default 980px CSS viewport.
+    val processedHtml = remember(html) { HtmlViewport.ensureMobileViewport(html) }
 
     Surface(
         shape = RoundedCornerShape(8.dp),
@@ -129,7 +134,7 @@ fun HtmlCard(
                         }
                         loadDataWithBaseURL(
                             "about:blank",
-                            html,
+                            processedHtml,
                             "text/html",
                             "UTF-8",
                             null
