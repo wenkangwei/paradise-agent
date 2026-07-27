@@ -124,10 +124,11 @@ class ChatRepositoryImpl @Inject constructor(
             messageDao.updateReaction(messageId, reaction)
         }
 
-    override suspend fun markDanglingStreamingInterrupted(reason: String) =
+    override suspend fun markDanglingStreamingInterrupted(reason: String, olderThan: Long) =
         withContext(ioDispatcher) {
+            val now = System.currentTimeMillis()
             val metadataJson = gson.toJson(MessageMetadata(interruptedReason = reason))
-            messageDao.markStreamingAsInterrupted(metadataJson)
+            messageDao.markStreamingAsInterrupted(metadataJson, olderThan, now)
         }
 
     override suspend fun markConversationStreamingInterrupted(

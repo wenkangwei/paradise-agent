@@ -53,11 +53,12 @@ interface ChatRepository {
     suspend fun setMessageReaction(messageId: String, reaction: String?)
 
     /**
-     * Mark every message still in STREAMING state as INTERRUPTED, attaching
-     * the supplied reason to its metadata. Call once on app start to clean
-     * up rows orphaned by a crashed/killed `:streaming` process.
+     * v4.2.6: signature changed to take [olderThan]. Only STREAMING rows
+     * whose `updatedAt < olderThan` are flipped to INTERRUPTED — this
+     * protects rows that the :streaming process is actively writing.
+     * Callers should pass `System.currentTimeMillis() - STALE_MS`.
      */
-    suspend fun markDanglingStreamingInterrupted(reason: String)
+    suspend fun markDanglingStreamingInterrupted(reason: String, olderThan: Long)
 
     /**
      * Same as [markDanglingStreamingInterrupted] but scoped to a single
