@@ -1,5 +1,6 @@
 package com.example.aichat.ui.chat
 
+import android.app.ActivityManager
 import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
@@ -88,17 +89,28 @@ class ChatViewModel @Inject constructor(
         // Without this the drawer would show a green dot forever on dead
         // sessions.
         //
-        // v4.2.4: DEFER the sweep by 5 seconds. When the user locks the
-        // screen and Android kills the main process, the :streaming process
-        // often keeps running and writes STREAMING rows every 150ms. An
-        // immediate sweep on the next ViewModel init races with the writer
-        // and incorrectly marks a still-active stream as INTERRUPTED — the
-        // user sees the reply freeze mid-stream when they reopen the app.
-        // Five seconds is long enough to ride out a normal screen-lock /
-        // unlock cycle while still recovering truly orphaned rows.
+        // v4.2.4: DEFER the sweep by 5 seconds so a freshly-restarted main
+        // process doesn't race the :streaming process's first write.
+        //
+        // v4.2.7: SKIP the sweep entirely when :streaming is still alive.
+        // The previous 5-second deferral was insufficient on its own — a
+        // long LLM reply (DeepSeek-R1, o1-style thinking models) can keep
+        // streaming for 30+ seconds after lock-screen. When the main
+        // process is killed by the OS and then rebuilt on unlock, the
+        // sweep would still catch an active :streaming process mid-write
+        // and mark its STREAMING row INTERRUPTED — making the AI bubble
+        // "disappear". Checking process liveness first is precise and
+        // requires no DB schema change (the v4.2.6 `updatedAt`-column
+        // approach was abandoned because Room's suspend-DAO + Kotlin
+        // default-param combo crashed on launch).
+        //
+        // If ActivityManager is unreachable (very rare), default to skip
+        // — worst case is a stuck green dot, never a disappeared reply.
         viewModelScope.launch {
             kotlinx.coroutines.delay(SESSION_SWEEP_DELAY_MS)
-            runCatching { repository.markDanglingStreamingInterrupted("session_init") }
+            if (!isStreamingProcessAlive()) {
+                runCatching { repository.markDanglingStreamingInterrupted("session_init") }
+            }
         }
         // v4.2.4: restore the conversation the user last had open so that
         // an Activity / process recreation (config change, OEM kill, return
@@ -129,6 +141,35 @@ class ChatViewModel @Inject constructor(
                 lastConversationTracker.clear()
             }
         }
+    }
+
+    /**
+     * Returns true if the `:streaming` foreground-service process is
+     * currently running in this app.
+     *
+     * Used by the init-time orphan sweep to decide whether to mark
+     * STREAMING rows as INTERRUPTED. If :streaming is alive, it is almost
+     * certainly mid-write on a reply right now, so marking those rows
+     * INTERRUPTED would make the user's in-progress AI reply disappear
+     * (the recurring "AI bubble vanishes after lock screen" bug).
+     *
+     * If :streaming is dead, the STREAMING rows are truly orphaned and
+     * the sweep can run safely.
+     *
+     * Implementation note: `ActivityManager.runningAppProcesses` returns
+     * the full process list for the *calling app's own package* on
+     * Android 5.0+ (other apps' processes are hidden). We match on the
+     * known suffix `:streaming` from AndroidManifest.
+     *
+     * Conservative default: if ActivityManager is unreachable or returns
+     * null, treat :streaming as alive (skip sweep). Worst case is a stuck
+     * drawer green dot — never a disappeared reply.
+     */
+    private fun isStreamingProcessAlive(): Boolean {
+        val am = context.getSystemService(ActivityManager::class.java) ?: return true
+        val processes = am.runningAppProcesses ?: return true
+        val streamingName = "${context.packageName}:streaming"
+        return processes.any { it.processName == streamingName }
     }
 
     private fun observeApiProfiles() {
