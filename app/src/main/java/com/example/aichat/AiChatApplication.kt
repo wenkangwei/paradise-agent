@@ -2,6 +2,7 @@ package com.example.aichat
 
 import android.app.Application
 import com.example.aichat.data.repository.ApiProfileBootstrap
+import com.example.aichat.util.CrashReporter
 import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +19,12 @@ class AiChatApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Install the crash reporter FIRST, before any Hilt-injected
+        // component is touched. The reporter must be in place to catch
+        // crashes triggered by the lines below (Hilt init, Room init,
+        // bootstrap, etc.). On the next launch, MainActivity surfaces
+        // the persisted crash via CrashReportHost.
+        CrashReporter.install(this)
         // Seed default ApiProfile on first launch or migrate legacy ConfigManager
         // values — failures are swallowed inside ensureSeeded() so they never
         // crash app startup.
