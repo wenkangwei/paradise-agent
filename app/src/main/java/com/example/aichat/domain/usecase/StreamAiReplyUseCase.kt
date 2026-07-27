@@ -186,10 +186,13 @@ class StreamAiReplyUseCase @Inject constructor(
             val finalContent = when {
                 apiError != null -> "⚠️ $apiError"
                 contentBuilder.isNotEmpty() -> contentBuilder.toString()
-                // No content but reasoning exists: keep content empty so the
-                // rendered bubble shows just the reasoning section. The row
-                // is preserved; only its body is blank.
-                reasoningBuilder.isNotEmpty() -> ""
+                // No content but reasoning exists: surface a visible marker
+                // so the bubble remains in the chat list even when the render
+                // guard in MessageBubble requires non-blank content (v4.2.8:
+                // previously "" here, combined with v4.2.2 SSE retry silently
+                // ending the flow on lock-screen socket abort, caused thinking
+                // models' reply bubble to disappear after unlock).
+                reasoningBuilder.isNotEmpty() -> "（已中断，请重试）"
                 // Truly nothing was emitted: surface a visible marker so the
                 // bubble isn't invisible in the chat list.
                 else -> "（已中断，请重试）"

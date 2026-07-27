@@ -155,7 +155,14 @@ fun MessageBubble(
 
             if (!hasToolCards) {
                 // 2) Text bubble (or streaming cursor placeholder)
-                if (message.content.isNotBlank() || (message.isStreaming && message.attachments.isEmpty())) {
+                // v4.2.8: also render when reasoningContent is non-blank, so
+                // thinking-model replies whose content body was lost (lock-screen
+                // socket abort → SSE retry silent-end) still show the reasoning
+                // trace instead of vanishing entirely. Belt-and-suspenders with
+                // StreamAiReplyUseCase now writing a placeholder.
+                if (message.content.isNotBlank() ||
+                    !message.reasoningContent.isNullOrBlank() ||
+                    (message.isStreaming && message.attachments.isEmpty())) {
                     Surface(
                         shape = if (isUser) bubbleShape else RoundedCornerShape(0.dp),
                         color = if (isUser) chatColors.userBubbleColor else aiFlatColor,
