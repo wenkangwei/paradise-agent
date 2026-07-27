@@ -21,6 +21,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -78,6 +80,11 @@ class StreamingService : Service() {
     private val streamingJobs = mutableMapOf<String, Job>()
     private val jobsLock = Any()
 
+    // v4.2.10: Honor MagicOS 用通知文本变化判定 FGS "活跃度"。静态文本触发
+    // 锁屏 60-120s 后回收。ticker 每 15s 刷新一次通知，让 Honor 判定活跃。
+    private var tickerJob: Job? = null
+    private var firstJobStartedAt: Long? = null
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -115,6 +122,19 @@ class StreamingService : Service() {
                 }
 
                 wakeLockProvider.acquire(this)
+                // v4.2.10: 启动 ticker 让通知文本随时间变化，对抗 Honor MagicOS
+                // 的 FGS 活跃度判定。首个 job 启动时记下时间戳。
+                synchronized(jobsLock) {
+                    if (tickerJob?.isActive != true) {
+                        firstJobStartedAt = System.currentTimeMillis()
+                        tickerJob = serviceScope.launch {
+                            while (isActive) {
+                                delay(TICKER_INTERVAL_MS)
+                                refreshNotification()
+                            }
+                        }
+                    }
+                }
                 val attachments = parseAttachments(attachmentsJson)
                 val job = serviceScope.launch {
                     try {
@@ -130,6 +150,10 @@ class StreamingService : Service() {
                             streamingJobs.isEmpty()
                         }
                         if (nowEmpty) {
+                            // v4.2.10: 最后一个 job 结束，停 ticker + 清状态
+                            tickerJob?.cancel()
+                            tickerJob = null
+                            firstJobStartedAt = null
                             wakeLockProvider.release()
                             stopSelf()
                         } else {
@@ -171,6 +195,9 @@ class StreamingService : Service() {
         synchronized(jobsLock) {
             streamingJobs.values.forEach { it.cancel() }
             streamingJobs.clear()
+            tickerJob?.cancel()
+            tickerJob = null
+            firstJobStartedAt = null
         }
         serviceScope.cancel()
         runCatching { wakeLockProvider.release() }
@@ -180,29 +207,47 @@ class StreamingService : Service() {
 
     private fun activeCount(): Int = synchronized(jobsLock) { streamingJobs.size }
 
-    private fun refreshNotification() {
+    private fun refreshNotification(elapsedSec: Int = currentElapsedSec()) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         runCatching {
-            nm.notify(NOTIFICATION_ID, buildNotification(activeCount()))
+            nm.notify(NOTIFICATION_ID, buildNotification(activeCount(), elapsedSec))
         }
+    }
+
+    /**
+     * 自首个 active job 启动以来经过的秒数。用于让通知文本随时间变化，
+     * Honor MagicOS 据此判定 FGS "活跃"而非"死任务"。
+     */
+    private fun currentElapsedSec(): Int {
+        val start = firstJobStartedAt ?: return 0
+        return ((System.currentTimeMillis() - start) / 1000).toInt()
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            // v4.2.10: 旧 channel 是 IMPORTANCE_LOW，Honor MagicOS 据此判定
+            // FGS 为"低优先级"→ 锁屏 60-120s 内主动 RST socket / 杀进程。
+            // Android 不允许升级已存在 channel 的 importance，必须删旧建新。
+            runCatching { nm.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "AI 流式回复",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = "保持后台连接，让 AI 回复在锁屏或切换应用时继续"
                 setShowBadge(false)
+                // IMPORTANCE_DEFAULT 默认带声音+震动，强制无声无震避免打扰用户。
+                // 关键点：Honor 看的是 importance 级别，不是声音。级别到位就行。
+                setSound(null, null)
+                enableVibration(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.createNotificationChannel(channel)
         }
     }
 
-    private fun buildNotification(activeCount: Int): Notification {
+    private fun buildNotification(activeCount: Int, elapsedSec: Int = 0): Notification {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -213,10 +258,13 @@ class StreamingService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val title = if (activeCount > 1) "正在回复 $activeCount 个对话..." else "AI 正在回复..."
-        val content = if (activeCount > 1)
-            "切换应用或锁屏不会中断；可在历史抽屉查看进度"
-        else
-            "保持前台运行，锁屏或切换应用不会中断"
+        // v4.2.10: 流过程中文本随 elapsedSec 变化，让 Honor 判定 FGS 活跃。
+        // 静态文本（v4.2.9 之前）会被视为"死任务"主动回收。
+        val content = when {
+            activeCount > 1 -> "切换应用或锁屏不会中断；$elapsedSec 秒"
+            elapsedSec > 0 -> "已持续 $elapsedSec 秒，锁屏不会中断"
+            else -> "保持前台运行，锁屏或切换应用不会中断"
+        }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
@@ -224,14 +272,25 @@ class StreamingService : Service() {
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
-            .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            // v4.2.10: PRIORITY_DEFAULT + VISIBILITY_PUBLIC 让 Honor MagicOS
+            // 把 FGS 视为"用户关心"的活跃任务。之前 LOW + setSilent 触发
+            // Honor 的"可回收"判定，锁屏后被杀。
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
     }
 
     companion object {
-        private const val CHANNEL_ID = "streaming_channel"
+        // v4.2.10: 换 channel id 让 IMPORTANCE 升级生效（Android 不允许升级
+        // 已存在 channel 的 importance）。旧 channel 在 createNotificationChannel
+        // 里被显式删除，避免残留两条。
+        private const val LEGACY_CHANNEL_ID = "streaming_channel"
+        private const val CHANNEL_ID = "streaming_channel_v2"
         private const val NOTIFICATION_ID = 0x5354_5245 // "STRE"
+        // v4.2.10: 每 15s 刷一次通知文本，让 Honor 判定 FGS 活跃。
+        // 太频繁（<10s）可能被系统判为 spam 限频，太稀疏（>30s）则可能在
+        // Honor 的 60s 检查窗口内只刷一次（不够）。15s 是经验值。
+        private const val TICKER_INTERVAL_MS = 15_000L
         const val ACTION_START = "com.example.aichat.action.START_STREAMING"
         const val ACTION_STOP = "com.example.aichat.action.STOP_STREAMING"
         const val EXTRA_CONVERSATION_ID = "conversation_id"
