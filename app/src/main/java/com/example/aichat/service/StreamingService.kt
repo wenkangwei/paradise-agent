@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.net.wifi.WifiManager
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
@@ -283,10 +284,20 @@ class StreamingService : Service() {
 }
 
 /**
- * Injectable wrapper around [PowerManager.WakeLock].
+ * Injectable wrapper around [PowerManager.WakeLock] + [WifiManager.WifiLock].
+ *
+ * Two locks because WakeLock alone is not enough on aggressive OEM ROMs
+ * (Honor MagicOS / Huawei EMUI / Xiaomi MIUI): when the screen turns off,
+ * the Wi-Fi chip drops into low-power mode (DTIM scaling, Rx filtering),
+ * which causes idle SSE sockets to get RST'd within 1-2 minutes even though
+ * the CPU is awake and the process is alive. Acquiring a high-perf WifiLock
+ * keeps the radio in active mode so the streaming socket survives screen-off.
+ *
+ * v4.2.9: WifiLock added specifically to fix "AI 回复在锁屏后中断" on Honor.
  */
 class StreamingWakeLock @Inject constructor() {
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     @Synchronized
     fun acquire(context: Context, timeoutMs: Long = 10 * 60 * 1000L) {
@@ -298,6 +309,18 @@ class StreamingWakeLock @Inject constructor() {
                 "aichat:streaming"
             ).apply { acquire(timeoutMs) }
         }
+        // WIFI_MODE_FULL_HIGH_PERF: 阻止锁屏后 Wi-Fi 进入 PS-Poll / DTIM 省电模式。
+        // 没有 this，Honor 锁屏 ~60-120s 内就会主动 RST 长连接（"software caused
+        // connection abort"）。注意用 applicationContext 避免 Activity 被销毁时
+        // WifiLock 被一并回收。
+        runCatching {
+            val wm = context.applicationContext
+                .getSystemService(Context.WIFI_SERVICE) as WifiManager
+            wifiLock = wm.createWifiLock(
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                "aichat:streaming-wifi"
+            ).apply { acquire() }
+        }
     }
 
     @Synchronized
@@ -306,5 +329,9 @@ class StreamingWakeLock @Inject constructor() {
             runCatching { if (lock.isHeld) lock.release() }
         }
         wakeLock = null
+        wifiLock?.let { lock: WifiManager.WifiLock ->
+            runCatching { if (lock.isHeld) lock.release() }
+        }
+        wifiLock = null
     }
 }

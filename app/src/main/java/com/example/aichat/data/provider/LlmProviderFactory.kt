@@ -237,6 +237,12 @@ private class OpenAiCompatibleProvider(
             .readTimeout(0, TimeUnit.SECONDS)   // no read timeout for streaming
             .writeTimeout(30, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)   // no overall cap; stream stays open
+            // v4.2.9: HTTP/2 ping frame every 30s. Keeps the SSE socket from
+            // looking "idle" to NAT / OEM Doze network policy on Honor/EMUI,
+            // which would otherwise RST the connection after ~60-120s of
+            // silence between model reasoning and first content token.
+            // For HTTP/1.1 endpoints this is a no-op (OkHttp just doesn't ping).
+            .pingInterval(30, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
 
