@@ -13,6 +13,7 @@ import com.example.aichat.domain.model.MessageStatus
 import com.example.aichat.domain.model.Role
 import com.example.aichat.domain.repository.ChatRepository
 import com.example.aichat.ui.chat.model.Attachment
+import com.example.aichat.util.HonorOemHelper
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.UUID
 import javax.inject.Inject
@@ -183,6 +184,19 @@ class StreamAiReplyUseCase @Inject constructor(
             // the bubble remains in the conversation history — the user can
             // see "this reply was interrupted" and tap retry, instead of
             // wondering where the message went.
+            //
+            // v4.2.11: Detect Honor PGManager-induced interruptions.
+            // Signature: finishedNormally == null (no Finish/Cancelled event)
+            // AND we did emit some content/reasoning. This means the SSE flow
+            // was cut silently — on Honor devices that's almost always
+            // PGManager freezing the process and destroying the socket
+            // ~1.3s after screen-off (proven via logcat, see HonorOemHelper).
+            // Tag such messages with errorCategory = "honor_oem_kill" so the
+            // UI can show an actionable "open Honor settings" affordance.
+            val likelyHonorKilled = finishedNormally == null &&
+                (contentBuilder.isNotEmpty() || reasoningBuilder.isNotEmpty()) &&
+                HonorOemHelper.isHonorOrHuawei()
+
             val finalContent = when {
                 apiError != null -> "⚠️ $apiError"
                 contentBuilder.isNotEmpty() -> contentBuilder.toString()
@@ -198,17 +212,31 @@ class StreamAiReplyUseCase @Inject constructor(
                 else -> "（已中断，请重试）"
             }
             val finalReasoning = if (apiError != null) null else reasoningBuilder.toString().ifBlank { null }
+            // v4.2.11: previously, finishedNormally==null fell through to
+            // COMPLETE, which silently mislabeled Honor-killed partial
+            // replies as fully complete. Now treat null as INTERRUPTED
+            // whenever we have content/reasoning — the user gets a clear
+            // signal that the reply was cut.
             val status = when {
                 apiError != null -> MessageStatus.FAILED
                 finishedNormally == true -> MessageStatus.COMPLETE
                 finishedNormally == false -> MessageStatus.INTERRUPTED
-                else -> MessageStatus.COMPLETE
+                // finishedNormally == null: stream ended abnormally
+                // (no Finish event, no Cancelled, no exception caught).
+                // On Honor this is the PGManager signature.
+                contentBuilder.isEmpty() && reasoningBuilder.isEmpty() -> MessageStatus.COMPLETE
+                else -> MessageStatus.INTERRUPTED
             }
             val interruptedReason = when {
                 apiError != null -> apiError
                 finishedNormally == false -> "interrupted"
+                likelyHonorKilled -> "honor_oem_kill"
+                finishedNormally == null &&
+                    (contentBuilder.isNotEmpty() || reasoningBuilder.isNotEmpty())
+                    -> "stream_silent_end"
                 else -> null
             }
+            val honorTaggedCategory = if (likelyHonorKilled) "honor_oem_kill" else errorCategory
             withContext(NonCancellable) {
                 runCatching {
                     repository.updateStreamingMessage(
@@ -222,7 +250,7 @@ class StreamAiReplyUseCase @Inject constructor(
                             aiMessageId,
                             MessageMetadata(
                                 interruptedReason = interruptedReason,
-                                errorCategory = errorCategory
+                                errorCategory = honorTaggedCategory
                             )
                         )
                     }

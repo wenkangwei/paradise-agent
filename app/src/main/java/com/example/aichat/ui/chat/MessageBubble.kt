@@ -64,6 +64,7 @@ import com.example.aichat.ui.chat.toolcard.ToolCardRecognizer
 import com.example.aichat.ui.chat.toolcard.ToolType
 import com.example.aichat.ui.chat.toolcard.deriveToolTitle
 import com.example.aichat.ui.theme.chatColors
+import com.example.aichat.util.HonorOemHelper
 
 /**
  * Renders a single chat message. User messages are right-aligned; assistant
@@ -257,6 +258,21 @@ fun MessageBubble(
                                 Spacer(Modifier.height(8.dp))
                                 RetryButton(onClick = onRetry)
                             }
+
+                            // v4.2.11: Honor PGManager-killed reply — offer a
+                            // one-tap shortcut to Honor's App Launch Management
+                            // settings. Only shown when the message metadata
+                            // carries errorCategory = "honor_oem_kill" (set by
+                            // StreamAiReplyUseCase when stream silent-ends on
+                            // a Honor device with partial content/reasoning).
+                            if (!isUser &&
+                                message.metadata?.errorCategory == "honor_oem_kill"
+                            ) {
+                                Spacer(Modifier.height(8.dp))
+                                HonorSettingsButton(onClick = {
+                                    HonorOemHelper.openAppLaunchManagement(context)
+                                })
+                            }
                         }
                     }
                 }
@@ -356,6 +372,14 @@ fun MessageBubble(
                                     if (idx == segments.lastIndex && message.status == MessageStatus.FAILED) {
                                         Spacer(Modifier.height(8.dp))
                                         RetryButton(onClick = onRetry)
+                                    }
+                                    if (idx == segments.lastIndex && !message.isStreaming &&
+                                        message.metadata?.errorCategory == "honor_oem_kill"
+                                    ) {
+                                        Spacer(Modifier.height(8.dp))
+                                        HonorSettingsButton(onClick = {
+                                            HonorOemHelper.openAppLaunchManagement(context)
+                                        })
                                     }
                                 }
                             }
@@ -612,6 +636,38 @@ private fun RetryButton(
         Spacer(Modifier.size(6.dp))
         Text(
             text = "重试",
+            style = MaterialTheme.typography.labelMedium
+        )
+    }
+}
+
+/**
+ * v4.2.11: Action button shown on replies killed by Honor PGManager.
+ * Launches Honor's App Launch Management settings so the user can
+ * whitelist the app — the only effective fix for Honor's kernel-level
+ * socket destruction on lock-screen.
+ */
+@Composable
+private fun HonorSettingsButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = modifier,
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            horizontal = 12.dp,
+            vertical = 0.dp
+        )
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Refresh,
+            contentDescription = null,
+            modifier = Modifier.size(14.dp)
+        )
+        Spacer(Modifier.size(6.dp))
+        Text(
+            text = "打开 Honor 设置",
             style = MaterialTheme.typography.labelMedium
         )
     }
