@@ -31,18 +31,5 @@ data class MessageEntity(
      * User feedback on AI messages: "like" | "dislike" | null.
      * Null on user messages. Added in v6 (MIGRATION_5_6).
      */
-    val reaction: String? = null,
-    /**
-     * Wall-clock millis of the last write to this row. Updated by
-     * `StreamAiReplyUseCase.maybePersistStreaming` every persist tick
-     * (~150ms while streaming). The main process's init-time watchdog
-     * uses this to distinguish a TRULY orphaned STREAMING row (no
-     * writer for >2 min) from an actively-streaming one — preventing
-     * the regression where the watchdog marked active streams as
-     * interrupted after a lock-screen / process-restart cycle.
-     *
-     * Added in v10 (MIGRATION_9_10). Defaults to `timestamp` for
-     * legacy rows (they're all COMPLETE/INTERRUPTED anyway).
-     */
-    val updatedAt: Long = timestamp
+    val reaction: String? = null
 )

@@ -83,29 +83,27 @@ class ChatViewModel @Inject constructor(
         observeApiProfiles()
         observeStreamingConversations()
         observeFavoriteTools()
-        // v4.2.6: stale-only watchdog. The previous aggressive sweep
-        // (delayed 5s then mark EVERY STREAMING row INTERRUPTED) was the
-        // root cause of the recurring "AI bubble disappears after lock
-        // screen" bug — it raced with active :streaming writes and killed
-        // streams that were still very much alive.
+        // One-time sweep of STREAMING rows orphaned by a previous :streaming
+        // process that died mid-stream (app crashed, OEM killed, reboot).
+        // Without this the drawer would show a green dot forever on dead
+        // sessions.
         //
-        // New behaviour: only mark rows whose `updatedAt` is older than
-        // 2 minutes as INTERRUPTED. The :streaming process writes
-        // `updatedAt` every 150ms while streaming, so any row updated in
-        // the last 2 minutes is by definition actively being written.
-        // Truly orphaned rows (from a :streaming process that died ≥2min
-        // ago) get cleaned up; active rows are untouched.
+        // v4.2.4: DEFER the sweep by 5 seconds. When the user locks the
+        // screen and Android kills the main process, the :streaming process
+        // often keeps running and writes STREAMING rows every 150ms. An
+        // immediate sweep on the next ViewModel init races with the writer
+        // and incorrectly marks a still-active stream as INTERRUPTED — the
+        // user sees the reply freeze mid-stream when they reopen the app.
+        // Five seconds is long enough to ride out a normal screen-lock /
+        // unlock cycle while still recovering truly orphaned rows.
         viewModelScope.launch {
-            kotlinx.coroutines.delay(WATCHDOG_DELAY_MS)
-            val threshold = System.currentTimeMillis() - STREAMING_STALE_MS
-            runCatching {
-                repository.markDanglingStreamingInterrupted("session_init_watchdog", threshold)
-            }
+            kotlinx.coroutines.delay(SESSION_SWEEP_DELAY_MS)
+            runCatching { repository.markDanglingStreamingInterrupted("session_init") }
         }
         // v4.2.4: restore the conversation the user last had open so that
         // an Activity / process recreation (config change, OEM kill, return
         // from lock screen) doesn't dump them into the empty state.
-        runCatching { restoreLastConversation() }
+        restoreLastConversation()
     }
 
     /**
@@ -615,19 +613,10 @@ class ChatViewModel @Inject constructor(
         const val MAX_CONCURRENT_STREAMS = 5
 
         /**
-         * Delay before the init-time orphan-streaming watchdog fires.
-         * Small delay so the watchdog runs AFTER the first Room
-         * emission settles (avoids racing initial state loads).
+         * Delay before the init-time dangling-streaming sweep fires.
+         * See [init] doc for the rationale (avoid racing the :streaming
+         * process after a lock-screen / process-restart cycle).
          */
-        const val WATCHDOG_DELAY_MS = 3_000L
-
-        /**
-         * A STREAMING row whose `updatedAt` is older than this is
-         * considered orphaned (no :streaming writer for that long) and
-         * is safe to mark INTERRUPTED. The :streaming process writes
-         * every 150ms, so 2 minutes of silence can only mean the
-         * writer is dead.
-         */
-        const val STREAMING_STALE_MS = 2L * 60 * 1000
+        const val SESSION_SWEEP_DELAY_MS = 5_000L
     }
 }

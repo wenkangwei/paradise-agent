@@ -22,14 +22,14 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE conversationId = :id ORDER BY timestamp ASC")
     suspend fun getByConversation(id: String): List<MessageEntity>
 
-    @Query("UPDATE messages SET content = :content, updatedAt = :updatedAt WHERE id = :id")
-    suspend fun updateContent(id: String, content: String, updatedAt: Long = System.currentTimeMillis())
+    @Query("UPDATE messages SET content = :content WHERE id = :id")
+    suspend fun updateContent(id: String, content: String)
 
-    @Query("UPDATE messages SET status = :status, updatedAt = :updatedAt WHERE id = :id")
-    suspend fun updateStatus(id: String, status: String, updatedAt: Long = System.currentTimeMillis())
+    @Query("UPDATE messages SET status = :status WHERE id = :id")
+    suspend fun updateStatus(id: String, status: String)
 
-    @Query("UPDATE messages SET reasoningContent = :content, updatedAt = :updatedAt WHERE id = :id")
-    suspend fun updateReasoning(id: String, content: String, updatedAt: Long = System.currentTimeMillis())
+    @Query("UPDATE messages SET reasoningContent = :content WHERE id = :id")
+    suspend fun updateReasoning(id: String, content: String)
 
     @Query("UPDATE messages SET status = :status, metadataJson = :metadata WHERE id = :id")
     suspend fun updateStatusAndMetadata(id: String, status: String, metadata: String?)
@@ -40,19 +40,14 @@ interface MessageDao {
     /**
      * Bulk-flip every row stuck in STREAMING to INTERRUPTED, attaching the
      * supplied metadataJson (e.g. {"interruptedReason":"process_killed"}).
-     *
-     * **v4.2.6**: callers MUST scope this to rows whose `updatedAt` is
-     * older than [olderThan] — a fresh STREAMING row is almost certainly
-     * being written right now by the :streaming process and must not be
-     * touched. The previous "sweep everything" version caused the
-     * recurring "AI bubble disappears after lock screen" regression.
+     * Used on app start to recover from a `:streaming` process that died
+     * mid-stream — otherwise the UI would spin forever on the stale row.
      */
     @Query(
-        "UPDATE messages SET status = 'INTERRUPTED', metadataJson = :metadataJson, " +
-            "updatedAt = :nowMs " +
-            "WHERE status = 'STREAMING' AND updatedAt < :olderThan"
+        "UPDATE messages SET status = 'INTERRUPTED', metadataJson = :metadataJson " +
+            "WHERE status = 'STREAMING'"
     )
-    suspend fun markStreamingAsInterrupted(metadataJson: String, olderThan: Long, nowMs: Long)
+    suspend fun markStreamingAsInterrupted(metadataJson: String)
 
     /**
      * Same as [markStreamingAsInterrupted] but scoped to a single conversation.

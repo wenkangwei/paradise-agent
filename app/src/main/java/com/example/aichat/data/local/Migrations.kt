@@ -161,35 +161,7 @@ val MIGRATION_8_9 = object : Migration(8, 9) {
     }
 }
 
-/**
- * v9 → v10: add `messages.updatedAt` so the main process's
- * orphan-streaming watchdog can distinguish a TRULY orphaned row
- * (no writer for >2 min) from one that the :streaming process is
- * actively writing every 150ms. Without this column the watchdog
- * had to mark *every* STREAMING row as interrupted on init, which
- * raced with active streams after a lock-screen cycle and made
- * the AI bubble "disappear" (the user's recurring complaint).
- *
- * Legacy rows back-fill `updatedAt = timestamp` — they're all
- * finalised (COMPLETE/INTERRUPTED/FAILED) so the value is unused.
- */
-val MIGRATION_9_10 = object : Migration(9, 10) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL(
-            "ALTER TABLE messages ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0"
-        )
-        // Back-fill from timestamp so legacy rows have a sensible value.
-        db.execSQL(
-            "UPDATE messages SET updatedAt = timestamp WHERE updatedAt = 0"
-        )
-        // Index to find orphaned STREAMING rows cheaply on watchdog tick.
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS index_messages_status_updatedAt ON messages(status, updatedAt)"
-        )
-    }
-}
-
-/** All migrations from the initial v2 schema to the current v10. */
+/** All migrations from the initial v2 schema to the current v9. */
 val ALL_MIGRATIONS = arrayOf(
     MIGRATION_2_3,
     MIGRATION_3_4,
@@ -197,6 +169,5 @@ val ALL_MIGRATIONS = arrayOf(
     MIGRATION_5_6,
     MIGRATION_6_7,
     MIGRATION_7_8,
-    MIGRATION_8_9,
-    MIGRATION_9_10
+    MIGRATION_8_9
 )

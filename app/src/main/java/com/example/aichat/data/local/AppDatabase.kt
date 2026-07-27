@@ -22,7 +22,7 @@ import com.example.aichat.data.local.entity.MessageEntity
         AgentProfileEntity::class,
         FavoriteToolEntity::class
     ],
-    version = 10,
+    version = 9,
     exportSchema = false
 )
 @TypeConverters(AttachmentConverter::class)
