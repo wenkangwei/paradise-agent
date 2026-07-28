@@ -12,6 +12,7 @@ import com.example.aichat.feature.profile.SettingsHomePage
 import com.example.aichat.feature.profile.SettingsRoute
 import com.example.aichat.feature.profile.apiconfig.ApiConfigEditPage
 import com.example.aichat.feature.profile.apiconfig.ApiConfigListPage
+import com.example.aichat.feature.voice.VoiceConfigPage
 import com.example.aichat.ui.chat.ChatScreen
 
 /**
@@ -82,6 +83,9 @@ fun AppNavGraph(
                 onBack = back,
                 onSaved = back
             )
+        }
+        composable(SettingsRoute.VOICE_CONFIG) {
+            VoiceConfigPage(onBack = back)
         }
 
         // Placeholder pages — each replaceable with a real implementation

@@ -359,7 +359,10 @@ private fun HtmlPreview(content: String) {
                 // meta tag doesn't get overridden by overview mode's fit-zoom
                 // when the page is wider than device width.
                 setInitialScale(100)
-                loadDataWithBaseURL("about:blank", processedHtml, "text/html", "UTF-8", null)
+                // v4.2.12 #4: synthetic origin (matches HtmlCard) so JS gets
+                // a real window.location.origin and relative URLs resolve
+                // against a stable hostname instead of about:blank.
+                loadDataWithBaseURL("https://aichat.local/", processedHtml, "text/html", "UTF-8", null)
             }
         },
         modifier = Modifier

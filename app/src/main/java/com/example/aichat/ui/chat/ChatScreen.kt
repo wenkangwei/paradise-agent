@@ -87,6 +87,7 @@ fun ChatScreen(
     viewModel: ChatViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val speakingMessageId by viewModel.speakingMessageId.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -104,6 +105,13 @@ fun ChatScreen(
     var favoriteDialog by remember {
         mutableStateOf<ToolCardTarget?>(null)
     }
+
+    // v4.2.12 #5: multi-select share sheet. null = hidden; non-null = the
+    // set of message ids to pre-check when the sheet opens. Tapping the
+    // share icon on a bubble seeds this with that bubble's id alone; the
+    // user can then check more bubbles inside the sheet before firing
+    // ACTION_SEND. See [MultiShareSheet].
+    var multiShareInitial by remember { mutableStateOf<Set<String>?>(null) }
 
     // Single share-action router. Wrapped in runCatching because share can
     // throw if no app handles the intent (rare on Android but possible on
@@ -414,7 +422,10 @@ fun ChatScreen(
                                         type = type
                                     )
                                 },
-                                onShareTool = onShareTool
+                                onShareTool = onShareTool,
+                                onShareMessage = { multiShareInitial = setOf(message.id) },
+                                onSpeak = { viewModel.speakMessage(message.id, message.content) },
+                                isSpeaking = speakingMessageId == message.id
                             )
                         }
                     }
@@ -520,6 +531,17 @@ fun ChatScreen(
                             }
                         },
                         onDismiss = { favoriteDialog = null }
+                    )
+                }
+
+                // v4.2.12 #5: multi-select share sheet. Pre-seeds with
+                // the message the user tapped share on; user can add more
+                // before firing ACTION_SEND.
+                multiShareInitial?.let { initialIds ->
+                    MultiShareSheet(
+                        messages = uiState.messages,
+                        initialSelectedIds = initialIds,
+                        onDismiss = { multiShareInitial = null }
                     )
                 }
             }

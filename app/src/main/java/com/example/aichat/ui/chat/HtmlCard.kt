@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -60,11 +61,13 @@ fun looksLikeHtmlPage(content: String): Boolean {
 @Composable
 fun HtmlCard(
     html: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenFullScreen: () -> Unit = {}
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     // v4.2.4: inject viewport meta so the page lays out at device width
     // instead of being zoomed out to fit a default 980px CSS viewport.
+    // v4.2.12 #4: also injects <base href="https://aichat.local/">.
     val processedHtml = remember(html) { HtmlViewport.ensureMobileViewport(html) }
 
     Surface(
@@ -93,6 +96,20 @@ fun HtmlCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f)
                 )
+                // v4.2.12 #4: open the page in the existing ToolCardFullScreen
+                // sheet — same JS / zoom / theme configuration as the inline
+                // preview, just a lot more pixels to work with.
+                IconButton(
+                    onClick = onOpenFullScreen,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.OpenInFull,
+                        contentDescription = "全屏查看",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
                 IconButton(
                     onClick = {
                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -132,8 +149,13 @@ fun HtmlCard(
                             allowFileAccess = false
                             allowContentAccess = false
                         }
+                        // v4.2.12 #4: synthetic origin instead of about:blank
+                        // so JS gets a real window.location.origin, relative
+                        // URLs resolve against a hostname, and localStorage
+                        // has a stable scope. <base href> is also injected
+                        // by HtmlViewport for the same reason.
                         loadDataWithBaseURL(
-                            "about:blank",
+                            "https://aichat.local/",
                             processedHtml,
                             "text/html",
                             "UTF-8",
@@ -143,7 +165,7 @@ fun HtmlCard(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 120.dp, max = 360.dp)
+                    .heightIn(min = 200.dp, max = 480.dp)
                     .clip(RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp))
             )
         }

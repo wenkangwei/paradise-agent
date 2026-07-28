@@ -6,22 +6,19 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -35,6 +32,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.ripple.rememberRipple
@@ -44,6 +43,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,10 +53,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -74,14 +77,17 @@ import com.example.aichat.ui.chat.model.Attachment
  *     no divider line is drawn).
  *   - The whole pill (attachments preview + TextField + inline buttons) is a
  *     single [Surface] with [surfaceVariant] fill + 24dp corner radius.
- *   - ⊕ (add attachment) sits as the TextField's leading icon; Stop / Mic /
- *     Send sit as the trailing icon. They never overflow below the pill.
  *
- * Button state machine (trailing):
+ * v4.2.12 #3a-redesign: two modes toggled by tapping the mic / keyboard icon.
+ *   - TEXT mode (default): ⊕ leading, TextField body, trailing = Stop / Mic /
+ *     Send. Tapping Mic (when input is empty + voice available) flips to VOICE.
+ *   - VOICE mode: ⊕ + 按住 说话 (press-and-hold) + ⌨. Long-pressing the middle
+ *     button drives the SpeechRecognizer; releasing transcribes and sends.
+ *     Tapping ⌨ flips back to TEXT.
+ *
+ * Button state machine (trailing, TEXT mode):
  *   - isLoading → ⏹ Stop
- *   - input empty AND no attachments AND voice available → 🎤 Mic
- *       (press-and-hold via [InteractionSource.collectIsPressedAsState] —
- *        more reliable than detectTapGestures; release auto-sends)
+ *   - voice available → 🎤 Mic (tap to enter VOICE mode)
  *   - otherwise → ➤ Send
  *
  * Keyboard: [Modifier.imePadding] + [Modifier.navigationBarsPadding] keep
@@ -107,6 +113,10 @@ fun ChatInputBar(
 ) {
     var text by rememberSaveable { mutableStateOf("") }
     var showSheet by rememberSaveable { mutableStateOf(false) }
+    // v4.2.12 #3a-redesign: Kimi-style mode toggle. Click 🎤 → voice mode
+    // (TextField replaced by 按住说话 button). Click ⌨ → back to text mode.
+    // Long-press in voice mode records; release transcribes and sends.
+    var inputMode by rememberSaveable { mutableStateOf(InputMode.TEXT) }
     val keyboard = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
 
@@ -173,7 +183,11 @@ fun ChatInputBar(
         ActivityResultContracts.RequestPermission()
     ) { granted -> hasMicPermission = granted }
 
-    // Voice recognizer — release auto-sends transcribed text
+    // v4.2.12 #3a-redesign: voice session result → SEND IMMEDIATELY (Kimi
+    // style). Earlier "append to input box" was tested and rejected by the
+    // user; in voice mode the user's intent is "speak → send", not "speak →
+    // edit → send". If transcription is empty (Honor ASR often returns ""
+    // for short utterances) we no-op so the user can retry.
     val voice = rememberVoiceRecognizer(onResult = { recognized ->
         val clean = recognized.trim()
         if (clean.isNotEmpty() || pendingAttachments.isNotEmpty()) {
@@ -200,6 +214,12 @@ fun ChatInputBar(
                 .fillMaxWidth()
                 .padding(horizontal = 4.dp, vertical = 4.dp)
         ) {
+            // v4.2.12 #3a-redesign: in TEXT mode this Column holds the
+            // attachment preview row + TextField; in VOICE mode it holds
+            // the attachment preview row + HoldToSpeakButton. The mode
+            // toggle is implemented inline below — see the `if (inputMode)`
+            // branch.
+
             // Attachment previews (inside the pill)
             if (pendingAttachments.isNotEmpty()) {
                 Row(
@@ -218,111 +238,152 @@ fun ChatInputBar(
                 }
             }
 
-            // Input row — TextField with embedded leading (⊕) + trailing (Stop/Mic/Send) icons
-            TextField(
-                value = text,
-                onValueChange = { text = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp, max = 144.dp),
-                placeholder = {
-                    val hint = when {
-                        isLoading -> "AI 正在回复..."
-                        voice.isAvailable && text.isBlank() -> "说点什么，或按住 🎤 说话"
-                        else -> "说点什么吧..."
-                    }
-                    Text(text = hint)
-                },
-                enabled = !isLoading,
-                maxLines = 5,
-                shape = RoundedCornerShape(24.dp),
-                leadingIcon = {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(percent = 50))
-                            .clickable(enabled = !isLoading) { showSheet = true },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Add,
-                            contentDescription = "添加附件",
-                            tint = if (isLoading) MaterialTheme.colorScheme.outline
-                                   else MaterialTheme.colorScheme.primary
-                        )
-                    }
-                },
-                trailingIcon = {
-                    when {
-                        isLoading -> {
+            // v4.2.12 #3a-redesign: Kimi-style mode toggle. TEXT mode shows the
+            // TextField with ⊕ leading and Stop/Mic/Send trailing. VOICE mode
+            // swaps the entire row for a wide "按住 说话" hold-button + keyboard
+            // toggle. This avoids the layout-thrashing flicker we hit when the
+            // voice status bar appeared/disappeared inside the same Surface as
+            // the press-and-hold MicButton (the press kept getting cancelled
+            // because the button's screen position shifted on every state
+            // change). In the new design, pressing happens on a stable full-
+            // width button whose bounds never move during a session.
+            if (inputMode == InputMode.TEXT) {
+                TextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp, max = 144.dp),
+                    placeholder = {
+                        val hint = when {
+                            isLoading -> "AI 正在回复..."
+                            else -> "说点什么吧..."
+                        }
+                        Text(text = hint)
+                    },
+                    enabled = !isLoading,
+                    maxLines = 5,
+                    shape = RoundedCornerShape(24.dp),
+                    leadingIcon = {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(percent = 50))
+                                .clickable(enabled = !isLoading) { showSheet = true },
+                            contentAlignment = Alignment.Center
+                        ) {
                             Icon(
-                                imageVector = Icons.Filled.StopCircle,
-                                contentDescription = "停止生成",
-                                tint = MaterialTheme.colorScheme.error,
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(percent = 50))
-                                    .clickable(onClick = onStop)
-                                    .padding(8.dp)
+                                imageVector = Icons.Filled.Add,
+                                contentDescription = "添加附件",
+                                tint = if (isLoading) MaterialTheme.colorScheme.outline
+                                       else MaterialTheme.colorScheme.primary
                             )
                         }
-                        text.isBlank() && pendingAttachments.isEmpty() && voice.isAvailable -> {
-                            MicButton(
-                                active = voice.isListening.value,
-                                enabled = !isLoading,
-                                modifier = Modifier.size(48.dp),
-                                onPress = {
-                                    if (!hasMicPermission) {
-                                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                    } else {
-                                        voice.start()
-                                    }
-                                },
-                                onRelease = { voice.stop() }
-                            )
-                        }
-                        else -> {
-                            val canSend = text.isNotBlank() || pendingAttachments.isNotEmpty()
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Send,
-                                contentDescription = "发送",
-                                tint = if (canSend) MaterialTheme.colorScheme.primary
-                                       else MaterialTheme.colorScheme.outline,
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(percent = 50))
-                                    .clickable(enabled = canSend) {
-                                        if (canSend) {
-                                            onSend(text.trim(), pendingAttachments)
-                                            text = ""
-                                            keyboard?.hide()
+                    },
+                    trailingIcon = {
+                        when {
+                            isLoading -> {
+                                Icon(
+                                    imageVector = Icons.Filled.StopCircle,
+                                    contentDescription = "停止生成",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(RoundedCornerShape(percent = 50))
+                                        .clickable(onClick = onStop)
+                                        .padding(8.dp)
+                                )
+                            }
+                            // v4.2.12 #3a-redesign: Mic shows only when the
+                            // input box is EMPTY. As soon as the user types a
+                            // single character (or attaches anything) the slot
+                            // flips to Send — same UX as the pre-redesign
+                            // behavior. Tapping Mic flips the whole row into
+                            // VOICE mode (HoldToSpeakButton); long-press-to-
+                            // record happens there, not here.
+                            text.isBlank() && pendingAttachments.isEmpty() && voice.isAvailable -> {
+                                Icon(
+                                    imageVector = Icons.Filled.Mic,
+                                    contentDescription = "切换到语音模式",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(RoundedCornerShape(percent = 50))
+                                        .clickable(enabled = !isLoading) {
+                                            if (!hasMicPermission) {
+                                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                            }
+                                            inputMode = InputMode.VOICE
                                         }
-                                    }
-                                    .padding(8.dp)
-                            )
+                                        .padding(8.dp)
+                                )
+                            }
+                            else -> {
+                                val canSend = text.isNotBlank() || pendingAttachments.isNotEmpty()
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "发送",
+                                    tint = if (canSend) MaterialTheme.colorScheme.primary
+                                           else MaterialTheme.colorScheme.outline,
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(RoundedCornerShape(percent = 50))
+                                        .clickable(enabled = canSend) {
+                                            if (canSend) {
+                                                onSend(text.trim(), pendingAttachments)
+                                                text = ""
+                                                keyboard?.hide()
+                                            }
+                                        }
+                                        .padding(8.dp)
+                                )
+                            }
                         }
-                    }
-                },
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    disabledContainerColor = Color.Transparent,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                    disabledIndicatorColor = Color.Transparent
-                ),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
-                keyboardActions = KeyboardActions(onSend = {
-                    val trimmed = text.trim()
-                    if (trimmed.isNotEmpty() || pendingAttachments.isNotEmpty()) {
-                        onSend(trimmed, pendingAttachments)
-                        text = ""
-                        keyboard?.hide()
-                    }
-                })
-            )
+                    },
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        disabledIndicatorColor = Color.Transparent
+                    ),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                    keyboardActions = KeyboardActions(onSend = {
+                        val trimmed = text.trim()
+                        if (trimmed.isNotEmpty() || pendingAttachments.isNotEmpty()) {
+                            onSend(trimmed, pendingAttachments)
+                            text = ""
+                            keyboard?.hide()
+                        }
+                    })
+                )
+            } else {
+                // VOICE mode: ⊕ stays on the left so the user can still attach
+                // images/files; the hold-to-speak button takes the middle; a
+                // keyboard icon on the right toggles back to TEXT mode.
+                //
+                // v4.2.12 #3a-test: onSend emits a hardcoded "测试" string so
+                // the gesture UX can be validated without depending on Honor's
+                // flaky system SpeechRecognizer. Real ASR wiring comes in a
+                // follow-up — see plan §3a STT URL.
+                HoldToSpeakButton(
+                    isLoading = isLoading,
+                    enabled = !isLoading,
+                    onAddAttachment = { showSheet = true },
+                    onSwitchToText = { inputMode = InputMode.TEXT },
+                    onStop = onStop,
+                    onSend = { onSend("测试", pendingAttachments) },
+                    onCancel = { /* no-op in test mode */ }
+                )
+            }
         }
     }
+
+    // v4.2.12 #3a-redesign: voice state (listening / transcribing / waveform)
+    // lives INSIDE HoldToSpeakButton — see the VOICE branch above. No Popup,
+    // no sibling status strip; the button's bounds are fixed by the row
+    // layout so the press-and-hold never gets cancelled by reflow.
 
     if (showSheet) {
         AttachmentSheet(
@@ -351,68 +412,245 @@ fun ChatInputBar(
 }
 
 /**
- * Press-and-hold Mic button.
+ * v4.2.12 #3a-redesign: Kimi-style voice-mode input row.
  *
- * Uses [MutableInteractionSource.collectIsPressedAsState] instead of
- * `detectTapGestures(onPress = ...)`. The InteractionSource path is the
- * officially recommended way for press-and-hold in Compose and survives
- * recomposition + configuration changes more reliably.
+ * Layout:
+ *   [⊕ attach]  [   hold-to-speak button (weight=1, fixed height)   ]  [⌨ keyboard]
  *
- * While pressed → onStart(). On release → onStop(). The visual ripple +
- * pulse animation gives immediate feedback even if ASR hasn't received
- * audio yet.
+ * Gesture-driven state machine — UI state is owned entirely by the
+ * gesture handler, NOT by any recognizer callback. This breaks the
+ * flicker cycle: previously the UI was driven by `voice.isListening /
+ * isTranscribing`, which Honor's flaky SpeechRecognizer would set/clear
+ * asynchronously and out of step with the user's finger, causing the
+ * press to be cancelled and the state to oscillate.
+ *
+ * State transitions:
+ *   press down           : IDLE      → RECORDING
+ *   drag outside bounds  : RECORDING → CANCELING
+ *   drag back inside     : CANCELING → RECORDING
+ *   release in RECORDING : SEND + IDLE
+ *   release in CANCELING : IDLE (no send)
+ *
+ * Layout invariant: the pressable Box uses fixed `height(48.dp)`, NOT
+ * `heightIn(min = ...)`. The content swap (icon vs waveform vs text)
+ * therefore never changes the Box's outer bounds → no reflow → the touch
+ * position stays under the finger → press is never cancelled by layout.
+ *
+ * v4.2.12 #3a-test: onSend sends a hardcoded "测试" string. Real ASR
+ * integration (whisper-compatible HTTP endpoint or system ASR) comes in
+ * a follow-up — see plan §3a.
  */
 @Composable
-private fun MicButton(
-    active: Boolean,
+private fun HoldToSpeakButton(
+    isLoading: Boolean,
     enabled: Boolean,
-    modifier: Modifier = Modifier,
-    onPress: () -> Unit,
-    onRelease: () -> Unit
+    onSend: () -> Unit,
+    onCancel: () -> Unit,
+    onAddAttachment: () -> Unit,
+    onSwitchToText: () -> Unit,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
+    // Single source of truth for the button's UI. Driven ONLY by gesture
+    // events below — never by any external state (recognizer callbacks,
+    // StateFlow, etc.). This is what kills the v4.2.12 #3a flicker.
+    var gestureState by remember { mutableStateOf(GestureState.IDLE) }
 
-    // Drive the recognizer start/stop from the pressed state
-    LaunchedEffect(isPressed) {
-        if (!enabled) return@LaunchedEffect
-        if (isPressed) onPress() else onRelease()
+    // v4.2.12 #3a-haptic: every gesture-state transition buzzes the device
+    // so the user feels the state change without looking at the screen.
+    //   IDLE      → RECORDING   : LongPress  (heavy, "recording started")
+    //   RECORDING → CANCELING   : light tick ("oops, you left the zone")
+    //   CANCELING → RECORDING   : light tick ("ok, back on")
+    //   release (either side)   : LongPress  (heavy, "done")
+    // Mirrors Kimi/WeChat's voice-mode haptic semantics.
+    val haptic = LocalHapticFeedback.current
+    fun transitionTo(next: GestureState) {
+        if (next == gestureState) return
+        val type = when (next) {
+            GestureState.RECORDING -> HapticFeedbackType.LongPress
+            GestureState.CANCELING -> HapticFeedbackType.TextHandleMove
+            GestureState.IDLE -> HapticFeedbackType.LongPress
+        }
+        haptic.performHapticFeedback(type)
+        gestureState = next
     }
 
-    val transition = rememberInfiniteTransition(label = "mic")
-    val pulseAlpha by transition.animateFloat(
-        initialValue = 1f,
-        targetValue = 0.3f,
-        animationSpec = infiniteRepeatable(tween(500), RepeatMode.Reverse),
-        label = "micAlpha"
-    )
-
-    Box(
+    Row(
         modifier = modifier
-            .clip(RoundedCornerShape(percent = 50))
-            .background(
-                if (active) MaterialTheme.colorScheme.error.copy(alpha = 0.18f)
-                else Color.Transparent
-            )
-            .clickable(
-                interactionSource = interactionSource,
-                indication = rememberRipple(bounded = false, radius = 24.dp),
-                enabled = enabled,
-                onClick = { /* press handled via interactionSource */ }
-            ),
-        contentAlignment = Alignment.Center
+            .fillMaxWidth()
+            .height(48.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Icon(
-            imageVector = Icons.Filled.Mic,
-            contentDescription = if (active) "正在聆听..." else "按住说话",
-            tint = if (active) MaterialTheme.colorScheme.error
-                   else MaterialTheme.colorScheme.primary,
+        // ⊕ — same add-attachment affordance as TEXT mode
+        Box(
             modifier = Modifier
-                .alpha(if (active) pulseAlpha else 1f)
-                .padding(10.dp)
-        )
+                .size(40.dp)
+                .clip(RoundedCornerShape(percent = 50))
+                .clickable(enabled = enabled, onClick = onAddAttachment),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Add,
+                contentDescription = "添加附件",
+                tint = if (enabled) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.outline
+            )
+        }
+
+        // Big hold-to-speak button. Fixed 48.dp height is critical — see
+        // the doc above. Content swaps inside never affect outer bounds.
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(48.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(
+                    when (gestureState) {
+                        GestureState.RECORDING -> MaterialTheme.colorScheme.error.copy(alpha = 0.10f)
+                        GestureState.CANCELING -> MaterialTheme.colorScheme.error.copy(alpha = 0.22f)
+                        GestureState.IDLE -> MaterialTheme.colorScheme.surface
+                    }
+                )
+                .pointerInput(enabled) {
+                    if (!enabled) return@pointerInput
+                    awaitEachGesture {
+                        // Finger down — enter RECORDING immediately. This is
+                        // a DOWN event, not a tap; we don't consume it so
+                        // the parent's drag detection still works.
+                        awaitFirstDown(requireUnconsumed = false)
+                        transitionTo(GestureState.RECORDING)
+
+                        // Loop over MOVE/UP events until the gesture ends.
+                        // For each event we check whether the finger is
+                        // still inside the button's bounds and transition
+                        // RECORDING ↔ CANCELING accordingly.
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.first()
+                                val inside = change.position.x >= 0f &&
+                                             change.position.x <= size.width.toFloat() &&
+                                             change.position.y >= 0f &&
+                                             change.position.y <= size.height.toFloat()
+
+                                if (change.changedToUp()) {
+                                    // Release — fire callback based on where
+                                    // the finger was when released.
+                                    val wasRecording = gestureState == GestureState.RECORDING
+                                    transitionTo(GestureState.IDLE)
+                                    if (wasRecording) onSend() else onCancel()
+                                    break
+                                }
+
+                                val next = if (inside) GestureState.RECORDING
+                                           else GestureState.CANCELING
+                                if (next != gestureState) transitionTo(next)
+                            }
+                        } catch (_: Exception) {
+                            // Defensive: if the gesture stream aborts
+                            // unexpectedly (e.g. parent recomposition yanks
+                            // the pointerInput scope), reset to IDLE so we
+                            // never get stuck showing "识别中".
+                            transitionTo(GestureState.IDLE)
+                        }
+                    }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            when (gestureState) {
+                GestureState.IDLE -> Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Mic,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "按住 说话",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                GestureState.RECORDING -> Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                ) {
+                    // TEST MODE: pass a constant rmsLevel so the existing
+                    // WaveformBars animation (which adds per-bar jitter)
+                    // produces lively visuals without a live mic feed.
+                    WaveformBars(
+                        rmsLevel = 0.6f,
+                        modifier = Modifier
+                            .width(60.dp)
+                            .height(22.dp)
+                    )
+                    Text(
+                        text = "识别中 松开发送",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+
+                GestureState.CANCELING -> Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "松开 取消",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        }
+
+        // Trailing slot: ⏹ while AI is replying (so the user can interrupt
+        // the generation without leaving voice mode), otherwise ⌨ to flip
+        // back to TEXT mode. Mirrors the TEXT-mode trailing slot's behavior
+        // of swapping Stop for Mic/Send during loading.
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(percent = 50))
+                .clickable(enabled = isLoading || enabled, onClick = if (isLoading) onStop else onSwitchToText),
+            contentAlignment = Alignment.Center
+        ) {
+            if (isLoading) {
+                Icon(
+                    imageVector = Icons.Filled.StopCircle,
+                    contentDescription = "停止生成",
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(8.dp)
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.Keyboard,
+                    contentDescription = "切换到文本输入",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
     }
 }
+
+/**
+ * v4.2.12 #3a-redesign: gesture-driven UI state for HoldToSpeakButton.
+ * Kept separate from [InputMode] (which is the outer TEXT/VOICE toggle)
+ * because the gesture state only applies while in VOICE mode.
+ */
+private enum class GestureState { IDLE, RECORDING, CANCELING }
 
 /** Guess a MIME type from a URI when the picker doesn't provide one. */
 private fun guessMime(uri: Uri): String {
@@ -455,3 +693,70 @@ private fun guessMime(uri: Uri): String {
         else -> "application/octet-stream"
     }
 }
+
+/**
+ * v4.2.12 #3a: Live audio waveform shown in the input bar placeholder while
+ * the user is pressing the mic. Heights driven by [rmsLevel] (0..1) reported
+ * by SpeechRecognizer.onRmsChanged.
+ *
+ * Implementation: 7 vertical bars drawn on a Canvas. The center bar uses the
+ * raw rmsLevel; neighbors decay symmetrically (multiplying by a fixed shape
+ * vector) so the waveform visually centers. A small per-bar jitter (stable
+ * per-bar phase derived from bar index, advanced by a ticker LaunchedEffect)
+ * keeps things lively even when rmsLevel stalls — important because some
+ * OEM ROMs (older Huawei EMUI is notorious) fire onRmsChanged at most a
+ * couple of times per utterance, which would otherwise freeze the display.
+ */
+@Composable
+private fun WaveformBars(
+    rmsLevel: Float,
+    modifier: Modifier = Modifier
+) {
+    // Stable per-bar phase so jitter doesn't reshuffle every recomposition.
+    val phases = remember { FloatArray(7) { it * 0.7f } }
+    var tick by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            tick++
+            // Advance phases; wrap into [0, 2π).
+            for (i in phases.indices) {
+                phases[i] = (phases[i] + 0.35f) % (2f * Math.PI.toFloat())
+            }
+            // 25fps is enough for a natural-looking waveform; faster wastes CPU.
+            kotlinx.coroutines.delay(40L)
+        }
+    }
+    val barColor = MaterialTheme.colorScheme.primary
+    Canvas(modifier = modifier) {
+        val barCount = 7
+        val totalWidth = size.width
+        val gap = 4.dp.toPx()
+        val barWidth = (totalWidth - gap * (barCount - 1)) / barCount
+        val cornerR = barWidth / 2f
+        val baseLevel = rmsLevel.coerceIn(0.05f, 1f)
+        // Symmetric decay: center bar tallest, edges shorter. Mimics the
+        // "energy concentrated in the middle" look of WeChat / Telegram.
+        val shape = floatArrayOf(0.45f, 0.65f, 0.85f, 1.0f, 0.85f, 0.65f, 0.45f)
+        for (i in 0 until barCount) {
+            // jitter in [0.85, 1.15] via sin
+            val jitter = 1f + 0.15f * kotlin.math.sin(phases[i])
+            val heightFraction = (baseLevel * shape[i] * jitter).coerceIn(0.08f, 1f)
+            val barHeight = size.height * heightFraction
+            val left = i * (barWidth + gap)
+            val top = (size.height - barHeight) / 2f
+            drawRoundRect(
+                color = barColor,
+                topLeft = androidx.compose.ui.geometry.Offset(left, top),
+                size = androidx.compose.ui.geometry.Size(barWidth, barHeight),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerR, cornerR)
+            )
+        }
+    }
+}
+
+/**
+ * v4.2.12 #3a-redesign: input-bar mode. Kimi-style toggle — clicking the mic
+ * icon swaps the whole TextField out for a "按住 说话" hold-to-speak button,
+ * and clicking the keyboard icon in voice mode swaps back.
+ */
+private enum class InputMode { TEXT, VOICE }

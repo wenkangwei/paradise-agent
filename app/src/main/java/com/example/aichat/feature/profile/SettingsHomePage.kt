@@ -91,7 +91,8 @@ fun SettingsHomePage(
             items(
                 items = listOf(
                     SettingsItem("模型 API 配置", SettingsRoute.API_CONFIG_LIST),
-                    SettingsItem("Agent 配置", SettingsRoute.AGENT_LIST)
+                    SettingsItem("Agent 配置", SettingsRoute.AGENT_LIST),
+                    SettingsItem("语音服务", SettingsRoute.VOICE_CONFIG)
                 ),
                 key = { it.route }
             ) { item ->
@@ -198,6 +199,7 @@ object SettingsRoute {
     const val API_CONFIG_LIST = "settings/api_config"
     const val API_CONFIG_EDIT = "settings/api_config/edit" // optional /{id}
     const val AGENT_LIST = "settings/agents"
+    const val VOICE_CONFIG = "settings/voice"
     const val APPEARANCE = "settings/appearance"
     const val NOTIFICATIONS = "settings/notifications"
     const val HELP = "settings/help"

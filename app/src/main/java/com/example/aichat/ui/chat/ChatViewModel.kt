@@ -67,6 +67,8 @@ class ChatViewModel @Inject constructor(
     private val apiProfileRepo: com.example.aichat.data.repository.ApiProfileRepository,
     private val favoriteToolRepo: FavoriteToolRepository,
     private val lastConversationTracker: LastConversationTracker,
+    private val voiceConfigRepo: com.example.aichat.data.voice.VoiceConfigRepository,
+    private val ttsController: com.example.aichat.data.voice.TtsController,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
@@ -562,11 +564,12 @@ class ChatViewModel @Inject constructor(
     }
 
     /**
-     * Re-issue the user prompt that produced a FAILED AI reply. The failed
-     * row is overwritten in place because we pass the same [failedAiMessageId]
-     * back to the streaming service — the UseCase's `appendMessage(aiPlaceholder)`
-     * uses OnConflictStrategy.REPLACE, so the new stream picks up where the
-     * old one died without leaving a stale error bubble in history.
+     * Re-issue the user prompt that produced this AI reply.
+     *
+     * v4.2.12: 之前只在 FAILED 状态下可重试。现在所有 AI 消息都能重试：
+     * - FAILED / INTERRUPTED → 用相同 aiMessageId（REPLACE 旧行，覆盖错误气泡）
+     * - COMPLETE / STREAMING → 生成新 aiMessageId，旧回复保留在历史里
+     *   （用户想"再来一次"看不同回答时不丢之前的）
      *
      * Look-up happens against the in-memory `uiState.messages` snapshot of
      * the *current* conversation — no DB round-trip needed. The previous
@@ -579,7 +582,14 @@ class ChatViewModel @Inject constructor(
         val failedIdx = messages.indexOfFirst { it.id == failedAiMessageId }
         if (failedIdx < 0) return
         val failedMsg = messages[failedIdx]
-        if (failedMsg.status != MessageStatus.FAILED) return
+
+        // v4.2.12: 区分两种重试场景
+        // - 失败/中断的错误气泡 → 用相同 ID，新流覆盖旧行
+        // - 完成的回复 → 新 ID，旧行保留
+        val isReplacingError = failedMsg.status == MessageStatus.FAILED ||
+            failedMsg.status == MessageStatus.INTERRUPTED
+        val targetAiMessageId = if (isReplacingError) failedAiMessageId
+                                else java.util.UUID.randomUUID().toString()
 
         // Find the user prompt that triggered this AI reply — walk backwards
         // from the failed bubble to the most recent USER message.
@@ -619,7 +629,7 @@ class ChatViewModel @Inject constructor(
                     conversationId = convId,
                     text = prevUser.content,
                     attachmentsJson = attachmentsJson,
-                    aiMessageId = failedAiMessageId
+                    aiMessageId = targetAiMessageId
                 )
             } catch (e: Exception) {
                 _events.emit(ChatEvent.ShowError(e.message ?: "重试失败", null))
@@ -627,6 +637,43 @@ class ChatViewModel @Inject constructor(
             }
         }
     }
+
+    /**
+     * v4.2.12 #3b: Speak an AI message via the configured TTS endpoint.
+     *
+     * Reads VoiceConfig from [voiceConfigRepo]; if no TTS URL is set, emits
+     * an error event so the UI can prompt the user to configure it. If the
+     * same message is currently playing, the call acts as a toggle (stop).
+     * If a different message is playing, that one is stopped first.
+     */
+    fun speakMessage(messageId: String, text: String) {
+        val config = voiceConfigRepo.config.value
+        if (!config.hasTts) {
+            viewModelScope.launch {
+                _events.emit(
+                    ChatEvent.ShowError(
+                        "请先在 设置 → 语音服务 中配置 TTS URL",
+                        null
+                    )
+                )
+            }
+            return
+        }
+        if (ttsController.speakingMessageId.value == messageId) {
+            ttsController.stop()
+            return
+        }
+        val provider = com.example.aichat.data.voice.HttpTtsProvider(
+            ttsUrl = config.ttsUrl,
+            ttsApiKey = config.ttsApiKey.ifBlank { null }
+        )
+        ttsController.play(messageId, text, provider)
+    }
+
+    fun stopSpeaking() = ttsController.stop()
+
+    /** ID of the message currently being spoken via TTS (or null). */
+    val speakingMessageId: StateFlow<String?> = ttsController.speakingMessageId
 
     fun loadConversations() {
         // No-op: conversations are already observed

@@ -24,8 +24,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.ThumbDown
 import androidx.compose.material.icons.filled.ThumbUp
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.CircularProgressIndicator
@@ -94,6 +96,17 @@ fun MessageBubble(
     onOpenTool: ToolCardAction = { _, _ -> },
     onCollectTool: ToolCardAction = { _, _ -> },
     onShareTool: ToolCardAction = { _, _ -> },
+    /**
+     * v4.2.12 #5: fired when the user taps the share icon on this bubble
+     * (or picks 分享 from the long-press menu). The screen opens a
+     * multi-select sheet pre-loaded with this message; the user can add
+     * more messages and then share them all as a single text block.
+     * Replaces the old behavior of immediately firing ACTION_SEND with
+     * just this one message.
+     */
+    onShareMessage: () -> Unit = {},
+    onSpeak: () -> Unit = {},
+    isSpeaking: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == Role.USER
@@ -205,18 +218,15 @@ fun MessageBubble(
                                     )
                                 } else if (!message.isStreaming && looksLikeHtmlPage(message.content)) {
                                     // Complete HTML page - render as an embedded WebView card
-                                    HtmlCard(html = message.content)
+                                    HtmlCard(
+                                        html = message.content,
+                                        onOpenFullScreen = { onOpenTool(message.content, ToolType.HTML) }
+                                    )
                                 } else {
-                                    // v4.2.5: SelectionContainer removed. The
-                                    // native text-selection ActionMode was the
-                                    // source of the duplicate "复制" oval popup
-                                    // that appeared alongside our long-press
-                                    // DropdownMenu. Compose 1.6.x doesn't allow
-                                    // customising the ActionMode contents, so
-                                    // the choice is: keep both popups (confusing)
-                                    // or remove SelectionContainer and rely on
-                                    // the long-press menu for copy/share/etc.
-                                    // User picked the single-menu route.
+                                    // v4.2.12: SelectionContainer restored (now in
+                                    // MarkdownText itself) since Compose BOM 1.7.x
+                                    // makes the native selection popup coexist
+                                    // cleanly with our long-press DropdownMenu.
                                     MarkdownText(
                                         text = message.content,
                                         style = MaterialTheme.typography.bodyMedium.copy(
@@ -226,6 +236,15 @@ fun MessageBubble(
                                 }
                             }
 
+                            // v4.2.12: 长按文字本身 → native selection popup (Copy/Select All)
+                            // 由 MarkdownText 内部的 SelectionContainer 提供。
+                            // 长按气泡空白处 → 我们的 DropdownMenu (点赞/点踩/复制全文/分享)。
+                            // 两个 popup 共存，各管各的。
+                            //
+                            // 用户期望的「复制所选」由 native popup 的 Copy 完成；
+                            // 想读 SelectionContainer 当前 selection 的代码很复杂
+                            // (LocalSelectionRegistrar + 手动 TextRange 映射)，
+                            // 收益又有限（native popup 已经做了），所以这里不重复。
                             if (message.isStreaming && message.content.isBlank() && message.reasoningContent.isNullOrBlank()) {
                                 // No content yet AND no reasoning — animated thinking indicator.
                                 StreamingPlaceholder(color = chatColors.onAiBubbleColor)
@@ -242,19 +261,24 @@ fun MessageBubble(
                                     onCopyAll = {
                                         clipboard.setText(AnnotatedString(message.content))
                                     },
-                                    onShare = {
-                                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                            type = "text/plain"
-                                            putExtra(Intent.EXTRA_TEXT, message.content)
-                                        }
-                                        runCatching {
-                                            context.startActivity(Intent.createChooser(shareIntent, null))
-                                        }
-                                    }
+                                    onShare = onShareMessage,
+                                    onRetry = onRetry,
+                                    onSpeak = onSpeak,
+                                    isSpeaking = isSpeaking
                                 )
                             }
 
-                            if (!isUser && message.status == MessageStatus.FAILED) {
+                            // v4.2.12: ReactionRow already carries a Refresh
+                            // icon for every completed AI bubble, so the
+                            // standalone RetryButton under FAILED is now
+                            // redundant — kept only for INTERRUPTED states
+                            // (where the more prominent affordance helps
+                            // surface that the message is in an error state,
+                            // not just normal completion).
+                            if (!isUser &&
+                                message.status != MessageStatus.COMPLETE &&
+                                !message.isStreaming
+                            ) {
                                 Spacer(Modifier.height(8.dp))
                                 RetryButton(onClick = onRetry)
                             }
@@ -346,41 +370,17 @@ fun MessageBubble(
                                         Spacer(Modifier.height(2.dp))
                                         StreamingCursor(color = chatColors.onAiBubbleColor)
                                     }
-                                    // Reaction / retry attach to the last text segment so
-                                    // they stay visually grouped with the bubble row.
-                                    if (idx == segments.lastIndex &&
-                                        !message.isStreaming && message.content.isNotBlank()
-                                    ) {
-                                        Spacer(Modifier.height(6.dp))
-                                        ReactionRow(
-                                            reaction = message.reaction,
-                                            onReact = onReact,
-                                            onCopyAll = {
-                                                clipboard.setText(AnnotatedString(message.content))
-                                            },
-                                            onShare = {
-                                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                                    type = "text/plain"
-                                                    putExtra(Intent.EXTRA_TEXT, message.content)
-                                                }
-                                                runCatching {
-                                                    context.startActivity(Intent.createChooser(shareIntent, null))
-                                                }
-                                            }
-                                        )
-                                    }
-                                    if (idx == segments.lastIndex && message.status == MessageStatus.FAILED) {
-                                        Spacer(Modifier.height(8.dp))
-                                        RetryButton(onClick = onRetry)
-                                    }
-                                    if (idx == segments.lastIndex && !message.isStreaming &&
-                                        message.metadata?.errorCategory == "honor_oem_kill"
-                                    ) {
-                                        Spacer(Modifier.height(8.dp))
-                                        HonorSettingsButton(onClick = {
-                                            HonorOemHelper.openAppLaunchManagement(context)
-                                        })
-                                    }
+                                    // v4.2.12 #5: ReactionRow + RetryButton +
+                                    // HonorSettingsButton moved OUT of this loop
+                                    // (rendered once after the loop). Previously
+                                    // they were attached to the last segment's
+                                    // Column, which meant they silently
+                                    // disappeared whenever the message ended
+                                    // with a Tool card (e.g. an HTML page).
+                                    // Surfacing them as their own trailing
+                                    // block makes the actions available on
+                                    // EVERY completed AI bubble regardless
+                                    // of how the body was segmented.
                                 }
                             }
                         }
@@ -396,6 +396,47 @@ fun MessageBubble(
                                 onCollect = { onCollectTool(segment.content, segment.type) },
                                 onShare = { onShareTool(segment.content, segment.type) }
                             )
+                        }
+                    }
+                }
+
+                // v4.2.12 #5: action row always renders after the segments
+                // loop in its own transparent Surface. This guarantees the
+                // retry/share/like buttons show on EVERY completed AI bubble
+                // — including ones whose body ends with a Tool card (the
+                // bug we're fixing here: previously the action row only
+                // rendered inside the last segment, which silently failed
+                // when the last segment was a Tool).
+                if (!isUser && !message.isStreaming && message.content.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(0.dp),
+                        color = aiFlatColor,
+                        tonalElevation = aiTonal,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                            Spacer(Modifier.height(6.dp))
+                            ReactionRow(
+                                reaction = message.reaction,
+                                onReact = onReact,
+                                onCopyAll = {
+                                    clipboard.setText(AnnotatedString(message.content))
+                                },
+                                onShare = onShareMessage,
+                                onRetry = onRetry,
+                                onSpeak = onSpeak,
+                                isSpeaking = isSpeaking
+                            )
+                            if (message.status != MessageStatus.COMPLETE) {
+                                Spacer(Modifier.height(8.dp))
+                                RetryButton(onClick = onRetry)
+                            }
+                            if (message.metadata?.errorCategory == "honor_oem_kill") {
+                                Spacer(Modifier.height(8.dp))
+                                HonorSettingsButton(onClick = {
+                                    HonorOemHelper.openAppLaunchManagement(context)
+                                })
+                            }
                         }
                     }
                 }
@@ -469,14 +510,8 @@ fun MessageBubble(
                 text = { Text("分享") },
                 leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },
                 onClick = {
-                    val intent = Intent(Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, message.content)
-                    }
-                    runCatching {
-                        context.startActivity(Intent.createChooser(intent, null))
-                    }
                     showMenu = false
+                    onShareMessage()
                 }
             )
         }
@@ -488,7 +523,10 @@ private fun ReactionRow(
     reaction: String?,
     onReact: (String) -> Unit,
     onCopyAll: () -> Unit = {},
-    onShare: () -> Unit = {}
+    onShare: () -> Unit = {},
+    onRetry: () -> Unit = {},
+    onSpeak: () -> Unit = {},
+    isSpeaking: Boolean = false
 ) {
     Row(
         horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -517,6 +555,25 @@ private fun ReactionRow(
             contentDescription = "分享",
             isSelected = false,
             onClick = onShare
+        )
+        // v4.2.12 #2: every completed AI bubble exposes retry. For
+        // FAILED/INTERRUPTED messages ChatViewModel reuses the same
+        // aiMessageId (in-place replace); for COMPLETE ones it mints a
+        // fresh UUID so the prior reply is preserved as a new row.
+        ReactionIcon(
+            icon = Icons.Filled.Refresh,
+            contentDescription = "重试",
+            isSelected = false,
+            onClick = onRetry
+        )
+        // v4.2.12 #3b: TTS playback. Icon swaps to Stop while this exact
+        // message is playing; tapping a different message's icon stops the
+        // current one first (handled by TtsController).
+        ReactionIcon(
+            icon = if (isSpeaking) Icons.Filled.Stop else Icons.Filled.VolumeUp,
+            contentDescription = if (isSpeaking) "停止朗读" else "朗读",
+            isSelected = isSpeaking,
+            onClick = onSpeak
         )
     }
 }
