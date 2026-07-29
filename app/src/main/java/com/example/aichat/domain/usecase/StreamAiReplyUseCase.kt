@@ -100,7 +100,13 @@ class StreamAiReplyUseCase @Inject constructor(
             }
 
             // 3. Build history and run the SSE request.
+            // Exclude the assistant placeholder we just inserted — its
+            // content is empty and placing an empty assistant message after
+            // the user's latest message violates ChatML turn order, which
+            // causes some backends (Ollama qwen2.5) to emit an empty
+            // response and terminate the stream immediately.
             val fullHistory = repository.getMessages(conversationId)
+                .filterNot { msg -> msg.id == aiMessageId && msg.content.isBlank() }
             val hasAnyAttachments = fullHistory.any { it.attachments.isNotEmpty() }
 
             val stream = if (hasAnyAttachments) {

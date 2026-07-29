@@ -122,7 +122,10 @@ private class OpenAiCompatibleProvider(
         // opens a fresh socket and usually succeeds.
         var hasEmittedAnyDelta = false
         var attempt = 0
+        // Debug logs (uncomment when diagnosing SSE / proxy issues):
+        // Log.d("OpenAiProvider", "stream start: model=${request.model} messages=${request.messages.size} endpoint=$endpointPath")
         while (true) {
+            // Log.d("OpenAiProvider", "attempt=${attempt + 1} hasDelta=$hasEmittedAnyDelta")
             val responseBody = try {
                 apiService.streamChat(endpointPath, request)
             } catch (e: HttpException) {
@@ -131,12 +134,14 @@ private class OpenAiCompatibleProvider(
                 // auth/quota/schema errors. The real reason ("messages field is
                 // required", "Rate limit exceeded", "令牌已过期", ...) lives here.
                 val raw = runCatching { e.response()?.errorBody()?.string() }.getOrNull()
+                // Log.e("OpenAiProvider", "HttpException code=${e.code()} raw=$raw", e)
                 throw com.example.aichat.data.remote.ApiException(
                     "API error: HTTP ${e.code()} - ${raw ?: e.message()}", e
                 )
             } catch (e: IOException) {
                 // Pre-stream IOException (couldn't even establish connection):
                 // retry up to MAX_STREAM_RETRY times with exponential backoff.
+                // Log.e("OpenAiProvider", "pre-stream IOException: ${e.message}", e)
                 attempt++
                 if (attempt > MAX_STREAM_RETRY) {
                     throw com.example.aichat.data.remote.NetworkException(
@@ -147,24 +152,30 @@ private class OpenAiCompatibleProvider(
                 continue
             }
 
+            // Log.d("OpenAiProvider", "responseBody acquired, collecting events...")
             try {
                 streamClient.toEventFlow(responseBody).collect { event ->
+                    // Log.d("OpenAiProvider", "event=$event")
                     emit(event)
                     if (event is StreamEvent.ContentDelta ||
                         event is StreamEvent.ReasoningDelta) {
                         hasEmittedAnyDelta = true
                     }
                 }
+                // Log.d("OpenAiProvider", "collect completed normally")
                 // Stream completed normally.
                 return@flow
             } catch (e: kotlinx.coroutines.CancellationException) {
+                // Log.d("OpenAiProvider", "collect cancelled", e)
                 // Cooperative cancellation — propagate, don't retry.
                 throw e
             } catch (e: IOException) {
+                // Log.e("OpenAiProvider", "mid-stream IOException: ${e.message}", e)
                 // Mid-stream IOException. If we've already shown content, end
                 // gracefully so the UseCase finalizes partial content as
                 // INTERRUPTED rather than throwing + showing an error bubble.
                 if (hasEmittedAnyDelta) {
+                    // Log.d("OpenAiProvider", "has delta, graceful end")
                     return@flow
                 }
                 attempt++
@@ -218,11 +229,11 @@ private class OpenAiCompatibleProvider(
                 .addHeader("Authorization", "Bearer ${profile.apiKeyEncrypted}")
                 .addHeader("Content-Type", "application/json")
                 .addHeader("Accept", "text/event-stream")
-                // Disable gzip on the SSE stream. If the server returns gzip'd
-                // chunks OkHttp waits for a full compressed block before
-                // decompressing — visible as "bursty" token delivery.
+                // SSE 必须禁用 gzip。反向代理（ZeroNews/cpolar）如果压缩
+                // chunked transfer 的 SSE 流，OkHttp 会在解压时只读到缓冲的
+                // 最后一个事件，表现为"只收到一个 Finish 就结束"。
+                // `Accept-Encoding: identity` 强制服务器返回未压缩字节流。
                 .addHeader("Accept-Encoding", "identity")
-                // Hint to intermediate proxies / CDN to disable buffering too.
                 .addHeader("Cache-Control", "no-cache")
                 .addHeader("Connection", "keep-alive")
             supplier.extraHeaders.forEach { (k, v) -> builder.addHeader(k, v) }
@@ -237,11 +248,6 @@ private class OpenAiCompatibleProvider(
             .readTimeout(0, TimeUnit.SECONDS)   // no read timeout for streaming
             .writeTimeout(30, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)   // no overall cap; stream stays open
-            // v4.2.9: HTTP/2 ping frame every 30s. Keeps the SSE socket from
-            // looking "idle" to NAT / OEM Doze network policy on Honor/EMUI,
-            // which would otherwise RST the connection after ~60-120s of
-            // silence between model reasoning and first content token.
-            // For HTTP/1.1 endpoints this is a no-op (OkHttp just doesn't ping).
             .pingInterval(30, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
