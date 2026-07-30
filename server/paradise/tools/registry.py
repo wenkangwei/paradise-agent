@@ -303,20 +303,37 @@ class ToolRegistry:
     # ------------------------------------------------------------------
 
     def dispatch(self, name: str, args: dict, **kwargs) -> str:
-        """Execute a tool handler by name.
+        """Execute a tool handler by name (sync handlers only).
 
-        * Async handlers are bridged automatically via ``_run_async()``.
-        * All exceptions are caught and returned as ``{"error": "..."}``
-          for consistent error format.
+        For async handlers, use dispatch_async().
+        All exceptions are caught and returned as ``{"error": "..."}``
+        for consistent error format.
+        """
+        entry = self.get_entry(name)
+        if not entry:
+            return json.dumps({"error": f"Unknown tool: {name}"})
+        if entry.is_async:
+            return json.dumps({"error": f"Tool '{name}' is async — use dispatch_async()"})
+        try:
+            return entry.handler(args, **kwargs)
+        except Exception as e:
+            logger.exception("Tool %s dispatch error: %s", name, e)
+            return json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {e}"})
+
+    async def dispatch_async(self, name: str, args: dict, **kwargs) -> str:
+        """Execute an async tool handler by name.
+
+        Works for both sync and async handlers.
+        All exceptions are caught and returned as ``{"error": "..."}``.
         """
         entry = self.get_entry(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
         try:
             if entry.is_async:
-                from model_tools import _run_async
-                return _run_async(entry.handler(args, **kwargs))
-            return entry.handler(args, **kwargs)
+                return await entry.handler(args, **kwargs)
+            else:
+                return entry.handler(args, **kwargs)
         except Exception as e:
             logger.exception("Tool %s dispatch error: %s", name, e)
             return json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {e}"})

@@ -81,8 +81,8 @@ WEB_SEARCH_SCHEMA = {
 
 # ── Handler ─────────────────────────────────────────────────────────
 
-def _handle_web_search(args: dict[str, Any]) -> str:
-    """Execute a web search and return normalized results."""
+async def _handle_web_search(args: dict[str, Any]) -> str:
+    """Execute a web search with RAG pipeline: search → fetch → summarize → format."""
     query = args.get("query", "")
     limit = min(max(int(args.get("limit", MAX_RESULTS_DEFAULT) or MAX_RESULTS_DEFAULT), 1), 20)
 
@@ -104,25 +104,38 @@ def _handle_web_search(args: dict[str, Any]) -> str:
         result_count = len(web_results)
         logger.info("web_search: %d results for '%s'", result_count, query)
 
-        # ── Auto-fetch content from top results ────────────────────
+        # ── RAG Pipeline: Search → Fetch → Summarize → Format ──────
         auto_fetch = os.getenv("WEB_SEARCH_AUTO_FETCH", "1") not in ("0", "false", "no")
+        auto_summarize = os.getenv("WEB_SEARCH_AUTO_SUMMARIZE", "1") not in ("0", "false", "no")
         fetch_count = min(int(os.getenv("WEB_SEARCH_FETCH_COUNT", "3")), 5)
 
         if auto_fetch and web_results:
-            logger.info("web_search: auto-fetching content from top %d results", fetch_count)
             urls = [r["url"] for r in web_results[:fetch_count] if r.get("url")]
             if urls:
                 from paradise.tools.web_fetch import fetch_and_extract
                 for i, url in enumerate(urls):
                     try:
-                        content, title, error = fetch_and_extract(url, max_chars=1500)
+                        content, title, error = fetch_and_extract(url, max_chars=5000)
                         if not error and content:
                             web_results[i]["fetched_title"] = title
                             web_results[i]["fetched_content"] = content
                     except Exception as e:
                         logger.debug("Auto-fetch failed for %s: %s", url[:60], e)
 
-        # ── Format as clean text (not JSON) for LLM consumption ────
+                # ── Summarize each fetched page via small LLM ──────
+                if auto_summarize:
+                    logger.info("web_search: summarizing %d fetched pages", fetch_count)
+                    fetched = [r for r in web_results[:fetch_count] if r.get("fetched_content")]
+                    if fetched:
+                        summaries = await _summarize_pages(
+                            [(r.get("fetched_content", ""), r.get("fetched_title", ""),
+                              r.get("url", ""), query)
+                             for r in fetched]
+                        )
+                        for i, summary in enumerate(summaries):
+                            if summary:
+                                fetched[i]["fetched_content"] = summary
+
         return _format_results(web_results)
 
     except Exception as e:
@@ -351,35 +364,130 @@ def _clean_html(text: str) -> str:
     return text
 
 
+# ── RAG Summarization ────────────────────────────────────────────
+
+_SUMMARIZE_PROMPT = """Extract key information from this web page content related to the search query.
+
+Rules:
+- Output 3-5 bullet points in clean markdown
+- Extract facts, data, code snippets, and actionable info
+- Ignore navigation menus, ads, cookie banners, boilerplate
+- Keep original technical terms and numbers
+- Each bullet: one specific fact or insight
+- Be concise — total output under 300 words
+
+Format:
+## [Page Title]
+- Key point 1
+- Key point 2
+- ..."""
+
+
+async def _summarize_pages(pages: list[tuple[str, str, str, str]]) -> list[str]:
+    """Summarize multiple fetched pages via a small/fast LLM.
+
+    Args:
+        pages: list of (content, title, url, query) tuples
+
+    Returns:
+        list of summary strings (same order as input)
+    """
+    import asyncio
+
+    async def _summarize_one(content: str, title: str, url: str, query: str) -> str:
+        """Summarize a single page."""
+        if len(content) < 200:
+            return content  # Too short, use as-is
+
+        user_prompt = (
+            f"Search query: {query}\n"
+            f"Page URL: {url}\n\n"
+            f"CONTENT:\n{content[:4000]}"
+        )
+
+        try:
+            result = await _call_summarizer_llm(_SUMMARIZE_PROMPT, user_prompt, title)
+            return result if result else _fallback_summary(content, title)
+        except Exception:
+            return _fallback_summary(content, title)
+
+    # Run all summaries in parallel
+    tasks = [_summarize_one(c, t, u, q) for c, t, u, q in pages]
+    return list(await asyncio.gather(*tasks))
+
+
+async def _call_summarizer_llm(system: str, user: str, title: str) -> str | None:
+    """Call Ollama with a small/fast model for summarization."""
+    import httpx
+
+    ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    model = os.getenv("SUMMARY_MODEL", "qwen2.5:3b")
+
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 600,
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
+        ) as client:
+            resp = await client.post(
+                f"{ollama_base.rstrip('/')}/v1/chat/completions",
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return content.strip() if content else None
+    except Exception as e:
+        logger.warning("Summarizer LLM failed for '%s': %s", title, e)
+        return None
+
+
+def _fallback_summary(content: str, title: str) -> str:
+    """Fallback: return first 300 chars as summary."""
+    cleaned = _clean_text(content)
+    if len(cleaned) <= 300:
+        return cleaned
+    return cleaned[:300] + "..."
+
+
 # ── Result formatting ────────────────────────────────────────────
 
 def _format_results(web_results: list[dict]) -> str:
-    """Format search results as clean markdown-like text for LLM.
+    """Format search results as clean brief summaries for LLM consumption.
 
-    Avoids raw JSON — returns human-readable text with optional
-    fetched content included.
+    Each result gets a compact one-line entry. Summarized content
+    (already processed by the RAG pipeline) is included cleanly.
     """
     if not web_results:
-        return tool_result("No search results found.")
+        return "No search results found."
 
-    lines = [f"搜索结果 ({len(web_results)}条):\n"]
+    lines = [f"Web search results ({len(web_results)} items):\n"]
     for i, r in enumerate(web_results):
-        title = r.get("title", "无标题")
-        url = r.get("url", "")
-        desc = r.get("description", "")[:200]
+        title = r.get("title", "").strip()
+        url = r.get("url", "").strip()
+        desc = r.get("description", "").strip()[:150]
+        fetched = r.get("fetched_content", "").strip()
 
-        lines.append(f"{i + 1}. **{title}**")
-        if url:
-            lines.append(f"   链接: {url}")
-        if desc:
-            lines.append(f"   摘要: {desc}")
+        # Compact entry header
+        lines.append(f"### {i + 1}. {title}")
+        lines.append(f"URL: {url}")
 
-        # Include fetched content if available
-        fetched = r.get("fetched_content", "")
         if fetched:
-            lines.append(f"   内容: {fetched[:800]}")
+            # Already summarized by RAG pipeline — display cleanly
+            lines.append(fetched)
+        elif desc:
+            lines.append(f"*{desc}*")
 
-        lines.append("")
+        lines.append("")  # blank line between results
 
     return "\n".join(lines)
 
@@ -391,8 +499,8 @@ registry.register(
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
     handler=_handle_web_search,
-    is_async=False,
-    description="Search the web via Bing (free, no API key needed). Also supports Brave Search and SearXNG.",
+    is_async=True,
+    description="Search the web with RAG pipeline: search → fetch → summarize → format",
     emoji=SEARCH_EMOJI,
     max_result_size_chars=5000,
 )

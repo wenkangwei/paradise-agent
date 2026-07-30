@@ -225,5 +225,5 @@ def get_builtin_tool_definitions() -> list[dict]:
 
 
 async def execute_tool(name: str, arguments: dict[str, Any]) -> str:
-    """Execute a tool by name via the registry."""
-    return registry.dispatch(name, arguments)
+    """Execute a tool by name via the registry (supports async tools)."""
+    return await registry.dispatch_async(name, arguments)
