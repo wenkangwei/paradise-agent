@@ -274,9 +274,33 @@ async def process_message_stream(
 
     # ── Image routing ─────────────────────────────────────────────
     if has_images:
-        if model_cap.is_multimodal:
-            logger.info("VL model '%s': images sent inline (no vision tool)", model_name)
-        else:
+        if model_cap.is_multimodal and decoded_attachments:
+            # VL model: replace original base64 with resized version.
+            # Resized data URL is available in decoded_attachments.
+            resized_map = {}
+            for att in decoded_attachments:
+                if att.get("data_url_resized"):
+                    resized_map[att.get("original_url", "")[:80]] = att["data_url_resized"]
+
+            if resized_map:
+                # Rewrite messages to use resized data URLs
+                for msg in messages:
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict) and part.get("type") == "image_url":
+                                img = part.get("image_url", {})
+                                url = img.get("url", "") if isinstance(img, dict) else ""
+                                # Match by URL prefix
+                                for orig_prefix, resized_url in resized_map.items():
+                                    if isinstance(url, str) and url[:60] in orig_prefix or url[:60] == orig_prefix[:60]:
+                                        if isinstance(img, dict):
+                                            img["url"] = resized_url
+                                        break
+                logger.info("VL model '%s': images resized and sent inline", model_name)
+            else:
+                logger.info("VL model '%s': images sent inline (no resize needed)", model_name)
+        elif not model_cap.is_multimodal:
             logger.info("Non-VL model '%s': pre-analyzing images with %s",
                         model_name, model_cap.vision_model)
             vision_results = []

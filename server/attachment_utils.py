@@ -101,14 +101,29 @@ def decode_and_save(content_parts: list[dict], base_dir: str = "") -> list[dict]
 
         try:
             decoded = base64.b64decode(b64_data)
+            original_size = len(decoded)
+            data_url_resized = ""
+
+            # Resize large images to reduce vision model processing time
+            if mime.startswith("image/"):
+                resized_bytes = _resize_image(decoded, max_dim=1024)
+                if resized_bytes and len(resized_bytes) < original_size:
+                    logger.debug("Resized image: %d → %d bytes", original_size, len(resized_bytes))
+                    decoded = resized_bytes
+                    b64_resized = base64.b64encode(resized_bytes).decode("ascii")
+                    data_url_resized = f"data:{mime};base64,{b64_resized}"
+
             filepath.write_bytes(decoded)
-            attachments.append({
+            att = {
                 "type": "image" if mime.startswith("image/") else "file",
                 "mime": mime,
                 "path": str(filepath),
                 "size_bytes": len(decoded),
                 "original_url": url[:80] + "..." if len(url) > 80 else url,
-            })
+            }
+            if data_url_resized:
+                att["data_url_resized"] = data_url_resized
+            attachments.append(att)
             logger.debug("Saved attachment: %s (%d bytes, %s)", filepath, len(decoded), mime)
         except Exception as e:
             logger.warning("Failed to decode attachment %d: %s", i, e)
@@ -151,6 +166,37 @@ def inject_context(user_message: str, attachments: list[dict]) -> str:
             lines.append(f"[附件{i + 1}: {path}]")
 
     return "\n".join(lines)
+
+
+def _resize_image(data: bytes, max_dim: int = 1024) -> bytes | None:
+    """Resize image to max_dim on the long edge. Returns None on failure."""
+    try:
+        from io import BytesIO
+        from PIL import Image
+        img = Image.open(BytesIO(data))
+        w, h = img.size
+        if w <= max_dim and h <= max_dim:
+            return None  # Already small enough
+        # Maintain aspect ratio
+        if w > h:
+            new_w = max_dim
+            new_h = int(h * max_dim / w)
+        else:
+            new_h = max_dim
+            new_w = int(w * max_dim / h)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        buf = BytesIO()
+        fmt = img.format or "JPEG"
+        if fmt.upper() == "GIF":
+            fmt = "PNG"  # GIF → PNG to avoid animation issues
+        img.save(buf, format=fmt, optimize=True)
+        return buf.getvalue()
+    except ImportError:
+        logger.warning("Pillow not installed — skipping image resize")
+        return None
+    except Exception as e:
+        logger.debug("Image resize skipped: %s", e)
+        return None
 
 
 def _format_size(size_bytes: int) -> str:
