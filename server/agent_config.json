@@ -18,7 +18,9 @@
   },
   "attachments": {
     "enabled": true,
-    "image_mode": "base64_passthrough",
-    "file_mode": "read_tool"
+    "image_mode": "skill_vision_analyze",
+    "file_mode": "skill_file_parse",
+    "temp_dir": "/tmp/aichat_attachments",
+    "max_file_size_mb": 10
   }
 }

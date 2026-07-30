@@ -24,6 +24,10 @@ from paradise.core.context import LoopContext
 
 from turn_logger import TurnRecorder, TrainingExporter
 
+# Import multimodal skills so they self-register with the tool registry
+import paradise.tools.vision_analyze  # noqa: F401 — registers vision_analyze
+import paradise.tools.file_parser     # noqa: F401 — registers file_parse
+
 logger = logging.getLogger("agent_handler")
 
 # ── Config ────────────────────────────────────────────────────────
@@ -133,28 +137,38 @@ training_exporter = TrainingExporter(LOG_DIR.resolve())
 
 # ── Message Processing ────────────────────────────────────────────
 
-def _extract_user_message(messages: list[dict]) -> tuple[str, str | list, list[dict]]:
+def _extract_user_message(messages: list[dict]) -> tuple[str, str | list, list[dict], list[dict]]:
     """Extract the last user message from OpenAI-format messages.
 
+    If multimodal content (image_url parts) is detected, decode base64
+    attachments to temp files and inject file paths into the text.
+
     Returns:
-        (text_only, full_content, attachments_meta)
-        - text_only: plain text extracted from all text parts
+        (text_only, full_content, attachments_meta, decoded_attachments)
+        - text_only: plain text with injected attachment file paths
         - full_content: original content (str or list) for multimodal passthrough
-        - attachments_meta: list of attachment metadata dicts
+        - attachments_meta: list of attachment metadata dicts (mime, type, size)
+        - decoded_attachments: list from attachment_utils.decode_and_save()
     """
+    from attachment_utils import decode_and_save, inject_context
+
     user_msgs = [m for m in messages if m.get("role") == "user"]
     if not user_msgs:
-        return "", "", []
+        return "", "", [], []
 
     last = user_msgs[-1]
     content = last.get("content", "")
 
     text_parts = []
     attachments_meta = []
+    decoded_attachments: list[dict] = []
 
     if isinstance(content, str):
         text_parts.append(content)
     elif isinstance(content, list):
+        # Decode and save base64 image/file attachments
+        decoded_attachments = decode_and_save(content)
+
         for part in content:
             if isinstance(part, dict):
                 if part.get("type") == "text":
@@ -170,7 +184,11 @@ def _extract_user_message(messages: list[dict]) -> tuple[str, str | list, list[d
                 text_parts.append(part)
 
     text_only = "\n".join(text_parts) if text_parts else ""
-    return text_only, content, attachments_meta
+    # Inject decoded attachment file paths so agent's TOOL phase can find them
+    if decoded_attachments:
+        text_only = inject_context(text_only, decoded_attachments)
+
+    return text_only, content, attachments_meta, decoded_attachments
 
 
 def _guess_mime_from_data_url(url: str) -> str:
@@ -242,7 +260,7 @@ async def process_message_stream(
     model_name = model or DEFAULT_MODEL
 
     # Extract user message and attachments
-    text_only, full_content, attachments_meta = _extract_user_message(messages)
+    text_only, full_content, attachments_meta, decoded_attachments = _extract_user_message(messages)
 
     # Quick check: multimodal content but no vision model
     has_images = any(a["type"] == "image" for a in attachments_meta)
@@ -282,6 +300,10 @@ async def process_message_stream(
     # Store multimodal content on ctx for _build_messages to use
     if isinstance(full_content, list):
         ctx._multimodal_content = full_content
+
+    # Store decoded attachment paths for tool phase
+    if decoded_attachments:
+        ctx._decoded_attachments = decoded_attachments
 
     try:
         # Phase 0: Intent check (needs_tools)

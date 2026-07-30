@@ -212,7 +212,7 @@ registry.register(
 
 def get_builtin_tool_definitions() -> list[dict]:
     """Return OpenAI-format tool definitions for all registered builtin tools."""
-    return registry.get_definitions({"bash", "search_files", "read_file"})
+    return registry.get_definitions({"bash", "search_files", "read_file", "vision_analyze", "file_parse"})
 
 
 async def execute_tool(name: str, arguments: dict[str, Any]) -> str:
