@@ -81,18 +81,27 @@ class ChatMessage(BaseModel):
     model_config = {"extra": "allow"}
 
 
-def _flatten_content(content: Any) -> str | None:
-    """Convert multimodal content list to plain string for Ollama.
+def _flatten_content(content: Any) -> Any:
+    """Normalize content for Ollama forwarding.
 
-    Drops non-text parts (images etc.) since Ollama's OpenAI-compat
-    endpoint doesn't accept them in this shape. Phase 2 will route
-    images via paradise transport's multimodal support.
+    - Plain text → return as-is
+    - List with ONLY text parts → join into string (legacy plain-text Ollama)
+    - List with image_url parts → return list as-is (Ollama supports
+      OpenAI multimodal format natively)
     """
     if content is None:
         return None
     if isinstance(content, str):
         return content
     if isinstance(content, list):
+        has_non_text = any(
+            isinstance(item, dict) and item.get("type") != "text"
+            for item in content
+        )
+        if has_non_text:
+            # Preserve multimodal content — Ollama handles image_url natively
+            return content
+        # All text — join into plain string for simpler processing
         parts: list[str] = []
         for item in content:
             if isinstance(item, dict) and item.get("type") == "text":

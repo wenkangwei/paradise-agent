@@ -25,3 +25,18 @@ android-app 这边的 agent 框架开发调试成熟后，以下需要同步回 
 - `aipet-social/src/backend/api/routes/chat.py` / `agent.py` / `session.py` — aipet 业务路由
 - `aipet-social/src/frontend/` — React 前端，aipet 专属
 - `aipet-social/start_backend.sh` — aipet 的启动脚本（双 PYTHONPATH），android-app 有自己的 `server/start.sh`
+
+## 开发待办
+
+### P0 — Agent 功能增强
+- [ ] **Web Search 工具** — paradise 新增 `web_search` tool，支持联网搜索
+  - 工具注册到 `paradise/tools/builtin.py`
+  - 搜索结果格式化后在 Android app 的 `ToolCard` 中展示
+  - Android 端 `ToolCardRecognizer` 需识别 `search_results` 类型
+  - 搜索结果卡片包含：标题、摘要、URL、相关性分数
+  - 搜索来源：优先使用免费 API（DuckDuckGo / SearXNG），后续可接付费搜索 API
+
+### P1 — 体验优化
+- [ ] 多模态附件透传优化 — 大文件 base64 用 multipart/form-data 上传替代 JSON 嵌入
+- [ ] 文件附件 read_tool 模式 — 非图片文件用 `read_file` tool 读取内容注入 context
+- [ ] 训练数据质量过滤 — 去重、过滤过短/低质量对话、工具调用序列化

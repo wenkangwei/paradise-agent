@@ -422,8 +422,15 @@ class ParadiseAgent:
         return ""
 
     def _build_messages(self, ctx: LoopContext, tool_results: str) -> list[dict]:
-        """Build message array for LLM."""
+        """Build message array for LLM.
+
+        Supports both plain-text content (str) and OpenAI multimodal
+        content (list of {type, text/image_url} parts).
+        """
         messages = []
+
+        # Check for multimodal content on the context
+        multimodal_content = getattr(ctx, '_multimodal_content', None)
 
         # Channel history
         if ctx.channel:
@@ -434,8 +441,16 @@ class ParadiseAgent:
                 if name and role == "user":
                     content = f"{name}: {content}"
                 messages.append({"role": role, "content": content})
+            # Add current user message (potentially multimodal)
+            if multimodal_content:
+                messages.append({"role": "user", "content": multimodal_content})
+            else:
+                messages.append({"role": "user", "content": ctx.user_message})
         else:
-            messages.append({"role": "user", "content": ctx.user_message})
+            if multimodal_content:
+                messages.append({"role": "user", "content": multimodal_content})
+            else:
+                messages.append({"role": "user", "content": ctx.user_message})
 
         # Inject tool results as system context
         if tool_results:

@@ -1,0 +1,24 @@
+{
+  "agent": {
+    "enabled": true,
+    "think_phase": true,
+    "enable_tools": true,
+    "max_tool_rounds": 3
+  },
+  "ollama": {
+    "base_url": "http://localhost:11434",
+    "default_model": "qwen2.5:7b",
+    "vision_model": "llava:7b"
+  },
+  "logging": {
+    "save_turns": true,
+    "save_training_data": true,
+    "log_dir": "logs",
+    "max_attachment_size_mb": 10
+  },
+  "attachments": {
+    "enabled": true,
+    "image_mode": "base64_passthrough",
+    "file_mode": "read_tool"
+  }
+}
