@@ -413,8 +413,11 @@ async def process_message_stream(
                         result=event.get("result", ""),
                         duration_ms=event.get("duration_ms", 0),
                     )
-                # Emit as system content delta (Android shows in tool card)
-                tool_info = f"\n🔧 {event.get('name', 'tool')}: {event.get('result', '')[:200]}\n"
+                # Emit tool call as formatted indicator (brief, not full result)
+                tool_name = event.get("name", "tool")
+                tool_emoji = _tool_emoji(tool_name)
+                tool_duration = event.get("duration_ms", 0)
+                tool_info = f"\n{tool_emoji} {tool_name} ({tool_duration:.0f}ms)\n"
                 content_full.append(tool_info)
                 yield _sse_chunk({
                     "choices": [{
@@ -423,6 +426,17 @@ async def process_message_stream(
                         "finish_reason": None,
                     }],
                 })
+                # Also yield the actual result as content for the LLM to see
+                result_text = event.get("result", "")
+                if result_text:
+                    content_full.append(result_text)
+                    yield _sse_chunk({
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": result_text},
+                            "finish_reason": None,
+                        }],
+                    })
 
             elif evt_type == "error":
                 if recorder:
@@ -498,6 +512,20 @@ async def process_message_stream(
 def _sse_chunk(data: dict) -> bytes:
     """Format a dict as an SSE 'data:' chunk."""
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def _tool_emoji(name: str) -> str:
+    """Return an emoji for a tool name."""
+    return {
+        "web_search": "\U0001f50d",
+        "web_fetch": "\U0001f310",
+        "vision_analyze": "\U0001f5bc",
+        "file_parse": "\U0001f4c4",
+        "read_file": "\U0001f4d6",
+        "bash": "\U0001f4bb",
+        "search_files": "\U0001f50e",
+        "context_expand": "\U0001f4c2",
+    }.get(name, "\U0001f527")
 
 
 # ── Warmup ─────────────────────────────────────────────────────────

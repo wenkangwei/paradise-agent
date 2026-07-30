@@ -100,9 +100,30 @@ def _handle_web_search(args: dict[str, Any]) -> str:
         else:
             result = _search_bing(query, limit)
 
-        result_count = len(result.get("data", {}).get("web", []))
+        web_results = result.get("data", {}).get("web", [])
+        result_count = len(web_results)
         logger.info("web_search: %d results for '%s'", result_count, query)
-        return json.dumps(result, indent=2, ensure_ascii=False)
+
+        # ── Auto-fetch content from top results ────────────────────
+        auto_fetch = os.getenv("WEB_SEARCH_AUTO_FETCH", "1") not in ("0", "false", "no")
+        fetch_count = min(int(os.getenv("WEB_SEARCH_FETCH_COUNT", "3")), 5)
+
+        if auto_fetch and web_results:
+            logger.info("web_search: auto-fetching content from top %d results", fetch_count)
+            urls = [r["url"] for r in web_results[:fetch_count] if r.get("url")]
+            if urls:
+                from paradise.tools.web_fetch import fetch_and_extract
+                for i, url in enumerate(urls):
+                    try:
+                        content, title, error = fetch_and_extract(url, max_chars=1500)
+                        if not error and content:
+                            web_results[i]["fetched_title"] = title
+                            web_results[i]["fetched_content"] = content
+                    except Exception as e:
+                        logger.debug("Auto-fetch failed for %s: %s", url[:60], e)
+
+        # ── Format as clean text (not JSON) for LLM consumption ────
+        return _format_results(web_results)
 
     except Exception as e:
         logger.warning("web_search error: %s", e)
@@ -328,6 +349,39 @@ def _clean_html(text: str) -> str:
     text = re.sub(r'&#\d+;', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
+
+# ── Result formatting ────────────────────────────────────────────
+
+def _format_results(web_results: list[dict]) -> str:
+    """Format search results as clean markdown-like text for LLM.
+
+    Avoids raw JSON — returns human-readable text with optional
+    fetched content included.
+    """
+    if not web_results:
+        return tool_result("No search results found.")
+
+    lines = [f"搜索结果 ({len(web_results)}条):\n"]
+    for i, r in enumerate(web_results):
+        title = r.get("title", "无标题")
+        url = r.get("url", "")
+        desc = r.get("description", "")[:200]
+
+        lines.append(f"{i + 1}. **{title}**")
+        if url:
+            lines.append(f"   链接: {url}")
+        if desc:
+            lines.append(f"   摘要: {desc}")
+
+        # Include fetched content if available
+        fetched = r.get("fetched_content", "")
+        if fetched:
+            lines.append(f"   内容: {fetched[:800]}")
+
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ── Self-register ────────────────────────────────────────────────────
