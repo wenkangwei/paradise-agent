@@ -155,16 +155,9 @@ class ParadiseAgent:
         tool_results = ""
         tool_events = []
 
-        # Phase 0: INTENT — check if tools needed
-        if ctx.enable_tools and _needs_tools(ctx.user_message):
-            # Phase 1: TOOL — now yields per-call events for visibility
-            async for event in self._tool_phase(ctx):
-                if event.get("type") == "tool_call":
-                    tool_events.append(event)
-                    yield event  # Forward to client immediately
-                elif event.get("type") == "tool_results":
-                    tool_results = event.get("content", "")
-        elif ctx.enable_tools and hasattr(ctx, '_force_tools') and ctx._force_tools:
+        # Phase 1: TOOL — LLM decides autonomously whether to call tools.
+        # Tools are always passed; the model may return tool_calls or plain text.
+        if ctx.enable_tools:
             async for event in self._tool_phase(ctx):
                 if event.get("type") == "tool_call":
                     tool_events.append(event)

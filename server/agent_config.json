@@ -7,7 +7,7 @@
   },
   "ollama": {
     "base_url": "http://localhost:11434",
-    "default_model": "qwen2.5:7b",
+    "default_model": "qwen2.5:7b-instruct",
     "vision_model": "llava:7b"
   },
   "logging": {

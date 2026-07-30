@@ -11,7 +11,7 @@ class LLMConfig:
     """LLM 连接配置."""
     api_url: str = ""
     api_key: str = ""
-    model: str = "glm-5.1"
+    model: str = ""
     provider: str = "openai"  # openai | anthropic | ollama
     temperature: float = 0.7
     max_tokens: int = 2048
