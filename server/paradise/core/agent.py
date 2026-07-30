@@ -190,17 +190,34 @@ class ParadiseAgent:
     # ── Phase 1: TOOL ────────────────────────────────────────────
 
     async def _tool_phase(self, ctx: LoopContext):
-        """Tool execution phase — yields tool_call events for client visibility."""
+        """Tool execution phase — yields tool_call events for client visibility.
+
+        Supports two modes based on model capabilities:
+        - tools_prompt: system-prompt ReAct for non-instruct models
+        - tools_native: OpenAI function calling for instruct models (default)
+        """
         messages = [{"role": "user", "content": ctx.user_message}]
+
+        # Filter out vision_analyze if VL model handles images directly
         tools = get_builtin_tool_definitions()
+        skip_vision = getattr(ctx, '_skip_vision_tool', False)
+        if skip_vision and tools:
+            tools = [t for t in tools if t.get("function", {}).get("name") != "vision_analyze"]
         if not tools:
             yield {"type": "tool_results", "content": ""}
             return
 
+        # Check routing mode
+        use_react = getattr(ctx, '_tools_prompt', False)
+
         results = []
         for _ in range(self.config.max_tool_rounds):
             try:
-                if hasattr(self.tool_transport, 'chat'):
+                if use_react:
+                    # ── System-prompt ReAct mode ──────────────────
+                    tool_calls = await self._react_tool_phase(messages, tools, ctx)
+                elif hasattr(self.tool_transport, 'chat'):
+                    # ── Native OpenAI function calling ─────────────
                     tool_kwargs = {
                         "model": self.config.tool_llm.model or self.config.llm.model,
                         "system_prompt": TOOL_SYSTEM_PROMPT,
@@ -217,43 +234,119 @@ class ParadiseAgent:
                         tool_kwargs["max_tokens"] = self.config.tool_llm.max_tokens
 
                     resp = await self.tool_transport.chat(**tool_kwargs)
-
                     content = resp.content if hasattr(resp, 'content') else ""
                     tool_calls = resp.tool_calls if hasattr(resp, 'tool_calls') else None
-
-                    if not tool_calls:
-                        if content:
-                            results.append(content)
-                        break
-
-                    # Execute tool calls — yield each as an event
-                    for tc in tool_calls:
-                        import json
-                        import time as _time
-                        t0 = _time.time()
-                        args = json.loads(tc.arguments) if isinstance(tc.arguments, str) else tc.arguments
-                        tool_result = await execute_tool(tc.name, args)
-                        elapsed = (_time.time() - t0) * 1000
-
-                        results.append(f"[{tc.name}] {tool_result}")
-                        messages.append({"role": "tool", "content": tool_result,
-                                         "tool_call_id": tc.id or ""})
-
-                        # Yield tool_call event for client visibility
-                        yield {
-                            "type": "tool_call",
-                            "name": tc.name,
-                            "arguments": args,
-                            "result": tool_result[:500],
-                            "duration_ms": elapsed,
-                        }
                 else:
                     break
+
+                if not tool_calls:
+                    if 'content' in dir() and content:
+                        results.append(content)
+                    break
+
+                # Execute tool calls — yield each as an event
+                for tc in tool_calls:
+                    import json
+                    import time as _time
+                    t0 = _time.time()
+                    if isinstance(tc, dict):
+                        name = tc.get("name", "")
+                        args = tc.get("arguments", {})
+                    else:
+                        name = tc.name
+                        args = json.loads(tc.arguments) if isinstance(tc.arguments, str) else tc.arguments
+                    tool_result = await execute_tool(name, args)
+                    elapsed = (_time.time() - t0) * 1000
+
+                    results.append(f"[{name}] {tool_result}")
+                    messages.append({"role": "tool", "content": tool_result,
+                                     "tool_call_id": tc.id if hasattr(tc, 'id') and tc.id else ""})
+
+                    # Yield tool_call event for client visibility
+                    yield {
+                        "type": "tool_call",
+                        "name": name,
+                        "arguments": args,
+                        "result": tool_result[:500],
+                        "duration_ms": elapsed,
+                    }
             except Exception as e:
                 logger.error("[Paradise] Tool phase error: %s", e)
                 break
 
         yield {"type": "tool_results", "content": "\n".join(results)}
+
+    async def _react_tool_phase(self, messages: list, tools: list, ctx: LoopContext) -> list[dict] | None:
+        """System-prompt ReAct: describe tools in prompt, parse text output.
+
+        For models that don't support native OpenAI function calling.
+        The LLM outputs [TOOL:name]...[/TOOL] blocks which we parse.
+        """
+        import re as _re
+
+        # Build prompt with tool descriptions
+        tool_lines = ["Available tools:"]
+        for t in tools:
+            fn = t.get("function", {})
+            name = fn.get("name", "")
+            desc = fn.get("description", "")
+            params = fn.get("parameters", {}).get("properties", {})
+            param_str = ", ".join(
+                f"{k}=<{v.get('type','str')}>" for k, v in params.items()
+            )
+            tool_lines.append(f"- {name}({param_str}): {desc}")
+
+        react_prompt = (
+            "You have access to tools. To use a tool, output:\n"
+            "[TOOL: name]\nparam1=value1\n[/TOOL]\n\n"
+            "Only use tools when necessary. If you don't need tools, just respond directly.\n\n"
+            + "\n".join(tool_lines)
+        )
+
+        tool_kwargs = {
+            "model": self.config.tool_llm.model or self.config.llm.model,
+            "system_prompt": react_prompt,
+            "messages": messages,
+            "temperature": 0.3,
+        }
+        tool_mode = getattr(self.tool_transport, 'api_mode', '')
+        if tool_mode == "ollama_native":
+            tool_kwargs["api_url"] = self.config.tool_llm.api_url or self.config.llm.api_url
+        else:
+            tool_kwargs["api_url"] = self.config.tool_llm.api_url or self.config.llm.api_url
+            tool_kwargs["api_key"] = self.config.tool_llm.api_key or self.config.llm.api_key
+            tool_kwargs["max_tokens"] = self.config.tool_llm.max_tokens
+
+        resp = await self.tool_transport.chat(**tool_kwargs)
+        content = resp.content if hasattr(resp, 'content') else ""
+
+        if not content:
+            return None
+
+        # Parse [TOOL:name]...[/TOOL] blocks
+        tool_blocks = _re.findall(
+            r'\[TOOL:\s*(\w+)\]\s*(.*?)\s*\[/TOOL\]', content, _re.DOTALL
+        )
+
+        if not tool_blocks:
+            return None  # Model chose not to use tools
+
+        parsed = []
+        for name, args_text in tool_blocks:
+            args = {}
+            for line in args_text.strip().split("\n"):
+                line = line.strip()
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    args[k.strip()] = v.strip()
+
+            parsed.append({
+                "name": name,
+                "arguments": args,
+                "id": "",
+            })
+
+        return parsed if parsed else None
 
     # ── Phase 2: THINK (ReAct) ──────────────────────────────────
 

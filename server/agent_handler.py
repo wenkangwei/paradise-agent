@@ -24,6 +24,7 @@ from paradise.core.context import LoopContext
 
 from turn_logger import TurnRecorder, TrainingExporter
 from context_compactor import get_compactor, estimate_messages_tokens, summary_index
+from model_router import detect_model, ToolRouter, ModelCap
 
 logger = logging.getLogger("agent_handler")
 
@@ -58,7 +59,7 @@ MAX_TOOL_ROUNDS = int(os.getenv("AGENT_MAX_TOOL_ROUNDS", str(_CFG.get("agent", {
 
 OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", _CFG.get("ollama", {}).get("base_url", "http://localhost:11434"))
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", _CFG.get("ollama", {}).get("default_model", "qwen2.5:7b"))
-VISION_MODEL = os.getenv("VISION_MODEL", _CFG.get("ollama", {}).get("vision_model", "llava:7b"))
+VISION_MODEL = os.getenv("VISION_MODEL", _CFG.get("ollama", {}).get("vision_model", "qwen2.5vl:7b"))
 
 SAVE_TURNS = os.getenv("LOG_SAVE_TURNS", str(_CFG.get("logging", {}).get("save_turns", True))).lower() in ("1", "true", "yes")
 SAVE_TRAINING = os.getenv("LOG_SAVE_TRAINING", str(_CFG.get("logging", {}).get("save_training_data", True))).lower() in ("1", "true", "yes")
@@ -238,15 +239,6 @@ def _build_channel_history(messages: list[dict], conv_id: str) -> Channel:
     return channel
 
 
-async def _model_supports_vision(model: str) -> bool:
-    """Check if the model supports vision (multimodal).
-
-    Currently checks by model name pattern. Future: query Ollama /api/show.
-    """
-    vision_patterns = ["llava", "bakllava", "qwen2.5-vl", "qwen-vl", "llama3.2-vision",
-                       "minicpm-v", "cogvlm", "fuyu", "gemini", "gpt-4o", "vision"]
-    model_lower = model.lower()
-    return any(p in model_lower for p in vision_patterns)
 
 
 async def process_message_stream(
@@ -268,18 +260,28 @@ async def process_message_stream(
     t0 = time.time()
     model_name = model or DEFAULT_MODEL
 
+    # ── Model capability detection & routing ───────────────────────
+    model_cap = detect_model(model_name)
+    logger.info(
+        "Model router: %s → multimodal=%s tool_calling=%s vision_model=%s",
+        model_name, model_cap.is_multimodal, model_cap.has_tool_calling, model_cap.vision_model,
+    )
+
     # Extract user message and attachments
     text_only, full_content, attachments_meta, decoded_attachments = _extract_user_message(messages)
 
-    # Quick check: multimodal content but no vision model
     has_images = any(a["type"] == "image" for a in attachments_meta)
-    if has_images and not await _model_supports_vision(model_name):
-        logger.warning(
-            "Multimodal request but model '%s' does not support vision, "
-            "dropping image parts. Consider using '%s' for vision tasks.",
-            model_name, VISION_MODEL,
-        )
-        # Strip images, keep text only (agent will handle text normally)
+
+    # ── Image routing ─────────────────────────────────────────────
+    if has_images:
+        if model_cap.is_multimodal:
+            # VL model: images go directly inline — no vision_analyze tool needed.
+            # Keep full_content as-is (list with text + image_url parts)
+            logger.info("VL model '%s': images sent inline (no vision tool)", model_name)
+        else:
+            # Non-VL model: decoded attachments + vision_analyze tool will handle images
+            logger.info("Non-VL model '%s': images routed to vision_analyze tool (vision=%s)",
+                        model_name, model_cap.vision_model)
 
     # ── Turn logger ───────────────────────────────────────────────
     turn = session_manager.next_turn(conv_id)
@@ -313,6 +315,16 @@ async def process_message_stream(
     # Store decoded attachment paths for tool phase
     if decoded_attachments:
         ctx._decoded_attachments = decoded_attachments
+
+    # ── Model routing info for agent ───────────────────────────────
+    ctx._model_cap = model_cap
+    if model_cap.tools_prompt:
+        # Non-instruct model: use system-prompt ReAct for tools
+        ctx._tools_prompt = True
+        logger.info("Model '%s' → system-prompt ReAct mode", model_name)
+    if model_cap.is_multimodal:
+        # VL model handles images inline — skip vision_analyze
+        ctx._skip_vision_tool = True
 
     # ── Context compaction ───────────────────────────────────────────
     # Check if conversation context exceeds 50% of model window.
