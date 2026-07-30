@@ -362,19 +362,20 @@ fun ChatInputBar(
                 // VOICE mode: ⊕ stays on the left so the user can still attach
                 // images/files; the hold-to-speak button takes the middle; a
                 // keyboard icon on the right toggles back to TEXT mode.
-                //
-                // v4.2.12 #3a-test: onSend emits a hardcoded "测试" string so
-                // the gesture UX can be validated without depending on Honor's
-                // flaky system SpeechRecognizer. Real ASR wiring comes in a
-                // follow-up — see plan §3a STT URL.
+                // Voice mode: press-and-hold triggers Android SpeechRecognizer.
+                // onPressStart/onPressEnd wire to VoiceRecognizer.start()/stop().
+                // Recognized text is sent via rememberVoiceRecognizer's onResult
+                // callback (declared above, line 191).
                 HoldToSpeakButton(
                     isLoading = isLoading,
                     enabled = !isLoading,
+                    onPressStart = { voice.start() },
+                    onPressEnd = { voice.stop() },
                     onAddAttachment = { showSheet = true },
                     onSwitchToText = { inputMode = InputMode.TEXT },
                     onStop = onStop,
-                    onSend = { onSend("测试", pendingAttachments) },
-                    onCancel = { /* no-op in test mode */ }
+                    onSend = { /* sent via voice.onResult callback */ },
+                    onCancel = { /* user cancelled — voice already stopped */ }
                 )
             }
         }
@@ -450,6 +451,8 @@ fun ChatInputBar(
 private fun HoldToSpeakButton(
     isLoading: Boolean,
     enabled: Boolean,
+    onPressStart: () -> Unit,
+    onPressEnd: () -> Unit,
     onSend: () -> Unit,
     onCancel: () -> Unit,
     onAddAttachment: () -> Unit,
@@ -526,6 +529,7 @@ private fun HoldToSpeakButton(
                         // the parent's drag detection still works.
                         awaitFirstDown(requireUnconsumed = false)
                         transitionTo(GestureState.RECORDING)
+                        onPressStart()
 
                         // Loop over MOVE/UP events until the gesture ends.
                         // For each event we check whether the finger is
@@ -545,6 +549,7 @@ private fun HoldToSpeakButton(
                                     // the finger was when released.
                                     val wasRecording = gestureState == GestureState.RECORDING
                                     transitionTo(GestureState.IDLE)
+                                    onPressEnd()
                                     if (wasRecording) onSend() else onCancel()
                                     break
                                 }
