@@ -4,11 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import kotlinx.coroutines.tasks.await
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 

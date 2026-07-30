@@ -84,6 +84,7 @@ dependencies {
 
     // ML Kit — on-device OCR
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
 
     // Retrofit & OkHttp
     implementation(libs.retrofit)

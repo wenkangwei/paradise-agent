@@ -404,6 +404,12 @@ fun ChatInputBar(
                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
                     )
                     AttachmentSource.Files -> fileLauncher.launch("*/*")
+                    AttachmentSource.Ocr -> galleryLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                    AttachmentSource.ObjectDetection -> galleryLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
                 }
             },
             onDismiss = { showSheet = false }

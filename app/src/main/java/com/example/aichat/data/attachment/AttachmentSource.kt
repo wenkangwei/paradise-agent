@@ -4,6 +4,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.ui.graphics.vector.ImageVector
 
 /**
@@ -48,14 +50,14 @@ sealed interface AttachmentSource {
     data object Ocr : AttachmentSource {
         override val id = "ocr"
         override val label = "文字识别"
-        override val icon: ImageVector = Icons.Filled.TextSnippet
+        override val icon: ImageVector = Icons.Filled.TextFields
     }
 
     /** Object detection via YOLO (server-side). */
     data object ObjectDetection : AttachmentSource {
         override val id = "detect"
         override val label = "物体检测"
-        override val icon: ImageVector = Icons.Filled.Visibility
+        override val icon: ImageVector = Icons.Filled.Search
     }
 }
 
