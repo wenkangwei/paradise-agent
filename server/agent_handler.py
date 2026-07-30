@@ -322,9 +322,37 @@ async def process_message_stream(
         if recorder:
             recorder.intent(needs_tools, should_think)
 
-        # Run agent loop
+        # Run agent loop with keep-alive pings.
+        # The THINK phase uses non-streaming chat() which can take 5-10s.
+        # Without keep-alive, OkHttp/ngrok/ZeroNews may drop the connection.
+        # We use a queue: background task feeds agent events, main loop
+        # yields SSE chunks or keep-alive comments.
         content_full = []
-        async for event in agent.handle_message(ctx):
+        event_queue: asyncio.Queue = asyncio.Queue()
+
+        async def _feed_events():
+            """Pull events from agent and put them in the queue."""
+            try:
+                async for evt in agent.handle_message(ctx):
+                    await event_queue.put(evt)
+                await event_queue.put(None)  # Sentinel: stream complete
+            except Exception as exc:
+                await event_queue.put({"type": "error", "content": str(exc)})
+                await event_queue.put(None)
+
+        feed_task = asyncio.create_task(_feed_events())
+
+        while True:
+            try:
+                event = await asyncio.wait_for(event_queue.get(), timeout=2.0)
+            except asyncio.TimeoutError:
+                # No event yet — send keep-alive so clients don't disconnect
+                yield b": keep-alive\n\n"
+                continue
+
+            if event is None:
+                break  # Stream complete
+
             evt_type = event.get("type", "")
 
             if evt_type == "thinking":
@@ -428,6 +456,11 @@ async def process_message_stream(
             "error": {"message": f"Agent error: {e}", "type": "agent_error"},
         })
         yield b"data: [DONE]\n\n"
+
+    finally:
+        # Ensure feed_task is cleaned up
+        if 'feed_task' in locals():
+            feed_task.cancel()
 
     elapsed = time.time() - t0
     logger.info(
