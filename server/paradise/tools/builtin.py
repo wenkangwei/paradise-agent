@@ -211,8 +211,17 @@ registry.register(
 # ── Convenience: get tool definitions for LLM ────────────────────────
 
 def get_builtin_tool_definitions() -> list[dict]:
-    """Return OpenAI-format tool definitions for all registered builtin tools."""
-    return registry.get_definitions({"bash", "search_files", "read_file", "vision_analyze", "file_parse"})
+    """Return OpenAI-format tool definitions for ALL registered tools.
+
+    Tools are auto-discovered at startup via registry.discover_builtin_tools().
+    To add a new tool, drop a .py file in paradise/tools/ with a
+    registry.register() call — no other changes needed.
+    """
+    all_names = set(registry.get_all_tool_names())
+    if not all_names:
+        # Fallback: if discovery hasn't run yet, use known builtins
+        all_names = {"bash", "search_files", "read_file"}
+    return registry.get_definitions(all_names)
 
 
 async def execute_tool(name: str, arguments: dict[str, Any]) -> str:

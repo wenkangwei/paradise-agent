@@ -24,11 +24,19 @@ from paradise.core.context import LoopContext
 
 from turn_logger import TurnRecorder, TrainingExporter
 
-# Import multimodal skills so they self-register with the tool registry
-import paradise.tools.vision_analyze  # noqa: F401 — registers vision_analyze
-import paradise.tools.file_parser     # noqa: F401 — registers file_parse
-
 logger = logging.getLogger("agent_handler")
+
+# ── Auto-discover tools ──────────────────────────────────────────────
+# Import all tool modules in paradise/tools/ that have a
+# top-level `registry.register(...)` call. After this, every tool is
+# registered and discoverable via registry.get_all_tool_names().
+#
+# To add a new tool, just drop a .py file in paradise/tools/ with a
+# `registry.register(...)` at module level — no other file changes needed.
+
+from paradise.tools.registry import discover_builtin_tools
+_TOOL_MODULES = discover_builtin_tools()
+logger.info("Auto-discovered %d tool modules: %s", len(_TOOL_MODULES), _TOOL_MODULES)
 
 # ── Config ────────────────────────────────────────────────────────
 
