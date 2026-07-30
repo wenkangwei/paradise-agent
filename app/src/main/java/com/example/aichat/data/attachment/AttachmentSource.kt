@@ -43,6 +43,20 @@ sealed interface AttachmentSource {
         override val label = "文件"
         override val icon: ImageVector = Icons.Filled.InsertDriveFile
     }
+
+    /** OCR text recognition via ML Kit. */
+    data object Ocr : AttachmentSource {
+        override val id = "ocr"
+        override val label = "文字识别"
+        override val icon: ImageVector = Icons.Filled.TextSnippet
+    }
+
+    /** Object detection via YOLO (server-side). */
+    data object ObjectDetection : AttachmentSource {
+        override val id = "detect"
+        override val label = "物体检测"
+        override val icon: ImageVector = Icons.Filled.Visibility
+    }
 }
 
 /**
@@ -55,7 +69,8 @@ class AttachmentSourceRegistry {
     private var extras: List<AttachmentSource> = emptyList()
 
     val all: List<AttachmentSource>
-        get() = listOf(AttachmentSource.Camera, AttachmentSource.Gallery, AttachmentSource.Files) + extras
+        get() = listOf(AttachmentSource.Camera, AttachmentSource.Gallery, AttachmentSource.Files,
+            AttachmentSource.Ocr, AttachmentSource.ObjectDetection) + extras
 
     fun byId(id: String): AttachmentSource? = all.firstOrNull { it.id == id }
 

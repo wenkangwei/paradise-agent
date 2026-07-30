@@ -28,6 +28,38 @@ interface TtsProvider {
     suspend fun synthesize(text: String, voice: String = "alloy", model: String = "tts-1"): ByteArray
 }
 
+class AndroidTtsProvider(
+    private val context: android.content.Context
+) : TtsProvider {
+    override suspend fun synthesize(text: String, voice: String, model: String): ByteArray {
+        // Android built-in TTS writes to a file, then read back as bytes
+        val file = java.io.File(context.cacheDir, "tts_android_${System.currentTimeMillis()}.wav")
+        val lock = java.util.concurrent.CountDownLatch(1)
+        var success = false
+        val tts = android.speech.tts.TextToSpeech(context) { status ->
+            // init callback — status == TextToSpeech.SUCCESS means engine ready
+        }
+        tts.language = java.util.Locale.CHINESE
+        tts.setSpeechRate(1.0f)
+        tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) { lock.countDown() }
+            override fun onError(utteranceId: String?) { lock.countDown() }
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?, errorCode: Int) { lock.countDown() }
+        })
+        val result = tts.synthesizeToFile(text, null, file, "tts_1")
+        if (result == android.speech.tts.TextToSpeech.SUCCESS) {
+            lock.await(30, java.util.concurrent.TimeUnit.SECONDS)
+            if (file.exists() && file.length() > 0) {
+                success = true
+            }
+        }
+        tts.shutdown()
+        return if (success) file.readBytes() else ByteArray(0)
+    }
+}
+
 class HttpTtsProvider(
     private val ttsUrl: String,
     private val ttsApiKey: String?,

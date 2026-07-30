@@ -262,15 +262,25 @@ async def process_message_stream(
     t0 = time.time()
     model_name = model or DEFAULT_MODEL
 
+    def _tick(label: str) -> None:
+        """Log timing since request start."""
+        elapsed = (time.time() - t0) * 1000
+        logger.warning("[⏱ %6.0fms] %s", elapsed, label)
+
+    _tick("request received")
+    logger.warning("[REQ] model=%s conv=%s msgs=%d", model_name, conv_id, len(messages))
+
     # ── Model capability detection & routing ───────────────────────
     model_cap = detect_model(model_name)
     logger.info(
         "Model router: %s → multimodal=%s tool_calling=%s vision_model=%s",
         model_name, model_cap.is_multimodal, model_cap.has_tool_calling, model_cap.vision_model,
     )
+    _tick(f"model detection done")
 
     # Extract user message and attachments
     text_only, full_content, attachments_meta, decoded_attachments = _extract_user_message(messages)
+    _tick(f"extract message done (attachments={len(decoded_attachments)})")
 
     has_images = any(a["type"] == "image" for a in attachments_meta)
 
@@ -308,6 +318,7 @@ async def process_message_stream(
 
         if vision_results:
             text_only = text_only + "\n\n" + "\n".join(vision_results)
+        _tick(f"image pre-analysis done ({len(vision_results)} results)")
 
     # ── Turn logger ───────────────────────────────────────────────
     turn = session_manager.next_turn(conv_id)
@@ -421,14 +432,15 @@ async def process_message_stream(
                 continue
 
             if event is None:
+                _tick("agent stream complete")
                 break  # Stream complete
 
             evt_type = event.get("type", "")
 
             if evt_type == "thinking":
+                _tick("agent → thinking")
                 if recorder:
                     recorder.thinking(event.get("content", ""))
-                # Yield thinking as reasoning_content (for Android thinking display)
                 yield _sse_chunk({
                     "choices": [{
                         "index": 0,
@@ -438,6 +450,8 @@ async def process_message_stream(
                 })
 
             elif evt_type == "content":
+                if not content_full:
+                    _tick("agent → first content token")
                 text = event.get("content", "")
                 content_full.append(text)
                 if recorder:

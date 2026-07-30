@@ -158,6 +158,7 @@ class ParadiseAgent:
         # Phase 1: TOOL — LLM decides autonomously whether to call tools.
         # Tools are always passed; the model may return tool_calls or plain text.
         if ctx.enable_tools:
+            logger.warning("[Paradise] TOOL phase start")
             async for event in self._tool_phase(ctx):
                 if event.get("type") == "tool_call":
                     tool_events.append(event)
@@ -180,6 +181,8 @@ class ParadiseAgent:
                 yield {"type": "thinking", "content": thinking_text}
 
         # Phase 3: RESPOND (streaming)
+        logger.warning("[Paradise] RESPOND phase start (tool_results=%d chars, thinking=%d chars)",
+                       len(tool_results), len(thinking_text))
         async for event in self._respond_phase(ctx, tool_results, thinking_text):
             yield event
 

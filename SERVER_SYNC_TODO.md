@@ -29,7 +29,12 @@ android-app 这边的 agent 框架开发调试成熟后，以下需要同步回 
 ## 开发待办
 
 ### P0 — Agent 功能增强
-- [ ] **Web Search 工具** — paradise 新增 `web_search` tool，支持联网搜索
+- [x] **Web Search 工具** — 已完成，Bing DDG Brave SearXNG 多后端
+- [ ] **qwen-vl 图片理解优化** — 当前图片分析 ~25s（VL 模型冷启动），需要：
+  - 预加载/预热 VL 模型减少首张延迟
+  - 或换用更小的视觉模型（如 moondream:1.8b）
+  - Ollama inline base64 格式兼容性问题待解决
+  - 当前 workaround：所有模型统一走 vision_analyze 预分析
   - 工具注册到 `paradise/tools/builtin.py`
   - 搜索结果格式化后在 Android app 的 `ToolCard` 中展示
   - Android 端 `ToolCardRecognizer` 需识别 `search_results` 类型

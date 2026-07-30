@@ -648,25 +648,18 @@ class ChatViewModel @Inject constructor(
      */
     fun speakMessage(messageId: String, text: String) {
         val config = voiceConfigRepo.config.value
-        if (!config.hasTts) {
-            viewModelScope.launch {
-                _events.emit(
-                    ChatEvent.ShowError(
-                        "请先在 设置 → 语音服务 中配置 TTS URL",
-                        null
-                    )
-                )
-            }
-            return
-        }
         if (ttsController.speakingMessageId.value == messageId) {
             ttsController.stop()
             return
         }
-        val provider = com.example.aichat.data.voice.HttpTtsProvider(
-            ttsUrl = config.ttsUrl,
-            ttsApiKey = config.ttsApiKey.ifBlank { null }
-        )
+        val provider: com.example.aichat.data.voice.TtsProvider = if (config.hasTts) {
+            com.example.aichat.data.voice.HttpTtsProvider(
+                ttsUrl = config.ttsUrl,
+                ttsApiKey = config.ttsApiKey.ifBlank { null }
+            )
+        } else {
+            com.example.aichat.data.voice.AndroidTtsProvider(context)
+        }
         ttsController.play(messageId, text, provider)
     }
 
