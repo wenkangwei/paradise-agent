@@ -23,6 +23,7 @@ from paradise.core.channel import Channel
 from paradise.core.context import LoopContext
 
 from turn_logger import TurnRecorder, TrainingExporter
+from context_compactor import get_compactor, estimate_messages_tokens, summary_index
 
 logger = logging.getLogger("agent_handler")
 
@@ -312,6 +313,30 @@ async def process_message_stream(
     # Store decoded attachment paths for tool phase
     if decoded_attachments:
         ctx._decoded_attachments = decoded_attachments
+
+    # ── Context compaction ───────────────────────────────────────────
+    # Check if conversation context exceeds 50% of model window.
+    # If so, compact older messages into summaries (fold/expand model).
+    compactor = get_compactor(model_name)
+    usage = compactor.current_usage_ratio(messages)
+    _compact_context = ""
+    if compactor.should_compact(messages):
+        logger.info(
+            "Context at %.0f%% of %d window — compacting (conv=%s, msgs=%d)",
+            usage * 100, compactor.window_size, conv_id, len(messages),
+        )
+        try:
+            messages = await compactor.compact(messages, conv_id)
+            _compact_context = summary_index.render_context(conv_id)
+            logger.info("Compacted to %d messages", len(messages))
+        except Exception as e:
+            logger.warning("Context compaction failed: %s", e)
+            # Continue with original messages
+
+    # Pass raw (possibly compacted) messages to agent for direct use
+    ctx._raw_messages = messages
+    if _compact_context:
+        ctx._compact_context = _compact_context
 
     try:
         # Phase 0: Intent check (needs_tools)

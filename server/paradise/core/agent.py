@@ -22,7 +22,7 @@ from paradise.heartbeat.decision import HeartbeatDecision
 from paradise.reflection.engine import ReflectionEngine
 from paradise.reflection.storage import ReflectionEntry
 from paradise.prompt.builder import prompt_builder
-from paradise.prompt.templates import TOOL_SYSTEM_PROMPT, THINK_SYSTEM_PROMPT, THINK_PROMPT
+from paradise.prompt.templates import TOOL_SYSTEM_PROMPT, THINK_SYSTEM_PROMPT, THINK_PROMPT, FORMAT_SUFFIX
 from paradise.tools.builtin import get_builtin_tool_definitions, execute_tool
 from paradise.transports import resolve_transport
 
@@ -145,7 +145,7 @@ class ParadiseAgent:
         logger.info("[Paradise] Agent %s initialized", self.agent_id)
 
     async def handle_message(self, ctx: LoopContext) -> AsyncGenerator[dict, None]:
-        """Process a user message: INTENT → [TOOL] → [THINK] → RESPOND → [REFLECT]."""
+        """Process a user message: INTENT → [TOOL] → THINK → RESPOND → [REFLECT]."""
         self._last_interaction_time = time.monotonic()
 
         # Update emotion on interaction
@@ -153,17 +153,37 @@ class ParadiseAgent:
         self.workspace.save_state(self.emotion_state.to_dict())
 
         tool_results = ""
+        tool_events = []
 
         # Phase 0: INTENT — check if tools needed
         if ctx.enable_tools and _needs_tools(ctx.user_message):
-            # Phase 1: TOOL (silent)
-            tool_results = await self._tool_phase(ctx)
+            # Phase 1: TOOL — now yields per-call events for visibility
+            async for event in self._tool_phase(ctx):
+                if event.get("type") == "tool_call":
+                    tool_events.append(event)
+                    yield event  # Forward to client immediately
+                elif event.get("type") == "tool_results":
+                    tool_results = event.get("content", "")
+        elif ctx.enable_tools and hasattr(ctx, '_force_tools') and ctx._force_tools:
+            async for event in self._tool_phase(ctx):
+                if event.get("type") == "tool_call":
+                    tool_events.append(event)
+                    yield event
+                elif event.get("type") == "tool_results":
+                    tool_results = event.get("content", "")
 
-        # Phase 2: THINK (optional, non-streaming)
+        # Phase 2: THINK (with tool context, streaming if possible)
         thinking_text = ""
         if _should_think(ctx.user_message):
             thinking_text = await self._think_phase(ctx, tool_results)
             if thinking_text:
+                # Include tool summary in thinking if tools were used
+                if tool_events:
+                    tool_summary = "\n".join(
+                        f"工具 {e.get('name', '?')}: {e.get('result', '')[:100]}"
+                        for e in tool_events
+                    )
+                    thinking_text = f"{thinking_text}\n\n[工具执行记录]\n{tool_summary}"
                 yield {"type": "thinking", "content": thinking_text}
 
         # Phase 3: RESPOND (streaming)
@@ -176,12 +196,13 @@ class ParadiseAgent:
 
     # ── Phase 1: TOOL ────────────────────────────────────────────
 
-    async def _tool_phase(self, ctx: LoopContext) -> str:
-        """Silent tool execution phase."""
+    async def _tool_phase(self, ctx: LoopContext):
+        """Tool execution phase — yields tool_call events for client visibility."""
         messages = [{"role": "user", "content": ctx.user_message}]
         tools = get_builtin_tool_definitions()
         if not tools:
-            return ""
+            yield {"type": "tool_results", "content": ""}
+            return
 
         results = []
         for _ in range(self.config.max_tool_rounds):
@@ -212,21 +233,34 @@ class ParadiseAgent:
                             results.append(content)
                         break
 
-                    # Execute tool calls
+                    # Execute tool calls — yield each as an event
                     for tc in tool_calls:
                         import json
+                        import time as _time
+                        t0 = _time.time()
                         args = json.loads(tc.arguments) if isinstance(tc.arguments, str) else tc.arguments
                         tool_result = await execute_tool(tc.name, args)
+                        elapsed = (_time.time() - t0) * 1000
+
                         results.append(f"[{tc.name}] {tool_result}")
                         messages.append({"role": "tool", "content": tool_result,
                                          "tool_call_id": tc.id or ""})
+
+                        # Yield tool_call event for client visibility
+                        yield {
+                            "type": "tool_call",
+                            "name": tc.name,
+                            "arguments": args,
+                            "result": tool_result[:500],
+                            "duration_ms": elapsed,
+                        }
                 else:
                     break
             except Exception as e:
                 logger.error("[Paradise] Tool phase error: %s", e)
                 break
 
-        return "\n".join(results)
+        yield {"type": "tool_results", "content": "\n".join(results)}
 
     # ── Phase 2: THINK (ReAct) ──────────────────────────────────
 
@@ -300,29 +334,23 @@ class ParadiseAgent:
     async def _respond_phase(
         self, ctx: LoopContext, tool_results: str, thinking_text: str
     ) -> AsyncGenerator[dict, None]:
-        """ReAct Respond step — streaming, clean output (no tags to parse)."""
-        # Build character prompt
-        soul_md = ctx.soul_md or self.workspace.read_md("soul")
-        memory_md = ctx.memory_md or self.workspace.read_md("memory")
-        mood_modifier = ctx.mood_modifier or self.emotion_engine.get_mood_modifier(self.emotion_state)
+        """ReAct Respond step — streaming with minimal prompt.
 
-        # Inject FrozenMemory facts
-        longterm_summary = ""
-        if self.memory.builtin:
-            longterm_summary = self.memory.builtin.to_prompt_text()
-
-        system_prompt = prompt_builder.build(
-            agent_name=ctx.agent_name,
-            soul_md=soul_md,
-            user_name=ctx.user_name,
-            user_personality=ctx.user_personality,
-            user_description=ctx.user_description,
-            channel=ctx.channel,
-            memory_md=memory_md,
-            longterm_summary=longterm_summary,
-            mood_modifier=mood_modifier,
-            enable_tools=bool(tool_results),
+        Uses a simplified system prompt (persona + output rules only)
+        instead of the 10-layer aipet prompt. Raw messages from Android
+        are passed through directly for conversation continuity.
+        """
+        # Minimal system prompt for AiChat Android use case
+        agent_name = ctx.agent_name or "AI助手"
+        system_prompt = (
+            f"你是{agent_name}，一个有用的AI助手。\n"
+            f"{FORMAT_SUFFIX}"
         )
+
+        # Add compacted context summaries if available
+        compact_context = getattr(ctx, '_compact_context', '') or ''
+        if compact_context:
+            system_prompt = compact_context + "\n\n" + system_prompt
 
         # Build messages
         messages = self._build_messages(ctx, tool_results)
@@ -424,39 +452,42 @@ class ParadiseAgent:
     def _build_messages(self, ctx: LoopContext, tool_results: str) -> list[dict]:
         """Build message array for LLM.
 
-        Supports both plain-text content (str) and OpenAI multimodal
-        content (list of {type, text/image_url} parts).
+        Passes through raw messages from context (set by agent_handler)
+        without reformatting. Supports multimodal content.
         """
         messages = []
 
-        # Check for multimodal content on the context
-        multimodal_content = getattr(ctx, '_multimodal_content', None)
-
-        # Channel history
-        if ctx.channel:
-            for msg in ctx.channel.get_history(last_n=20):
-                role = "assistant" if msg.get("sender_id") == ctx.agent_id else "user"
-                name = msg.get("sender_name", msg.get("role", ""))
+        # Use raw messages if available (set by agent_handler from Android request)
+        raw_messages = getattr(ctx, '_raw_messages', None)
+        if raw_messages and isinstance(raw_messages, list) and len(raw_messages) > 0:
+            # Pass through all messages as-is (Android already sends full history)
+            for msg in raw_messages:
+                role = msg.get("role", "user")
                 content = msg.get("content", "")
-                if name and role == "user":
-                    content = f"{name}: {content}"
                 messages.append({"role": role, "content": content})
-            # Add current user message (potentially multimodal)
-            if multimodal_content:
-                messages.append({"role": "user", "content": multimodal_content})
-            else:
-                messages.append({"role": "user", "content": ctx.user_message})
         else:
-            if multimodal_content:
-                messages.append({"role": "user", "content": multimodal_content})
+            # Fallback: channel-based message building
+            multimodal_content = getattr(ctx, '_multimodal_content', None)
+            if ctx.channel:
+                for msg in ctx.channel.get_history(last_n=20):
+                    role = "assistant" if msg.get("sender_id") == ctx.agent_id else "user"
+                    content = msg.get("content", "")
+                    messages.append({"role": role, "content": content})
+                if multimodal_content:
+                    messages.append({"role": "user", "content": multimodal_content})
+                else:
+                    messages.append({"role": "user", "content": ctx.user_message})
             else:
-                messages.append({"role": "user", "content": ctx.user_message})
+                if multimodal_content:
+                    messages.append({"role": "user", "content": multimodal_content})
+                else:
+                    messages.append({"role": "user", "content": ctx.user_message})
 
-        # Inject tool results as system context
+        # Inject tool results as system context (with collapse hint)
         if tool_results:
             messages.append({
                 "role": "system",
-                "content": f"[工具执行结果]\n{tool_results}",
+                "content": f"[工具执行结果]\n{tool_results}\n[基于以上结果回复用户]",
             })
 
         return messages

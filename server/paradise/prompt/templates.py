@@ -28,9 +28,8 @@ FORMAT_SUFFIX = (
     "[输出规则]\n"
     "直接输出你的回复内容，不要加任何标签或前缀。\n"
     "- 不要输出 <thinking>、<response>、thinking:、response:、assistant: 等标记\n"
-    "- 不要重复频道中其他人说过的话\n"
-    "- 只输出你自己作为角色想说的话，1-3句话\n"
-    "- 展现你的个性和情感"
+    "- 用中文回复\n"
+    "- 保持回复简洁有用"
 )
 
 # Tool format — also clean output
