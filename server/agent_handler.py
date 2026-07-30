@@ -60,6 +60,8 @@ MAX_TOOL_ROUNDS = int(os.getenv("AGENT_MAX_TOOL_ROUNDS", str(_CFG.get("agent", {
 OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", _CFG.get("ollama", {}).get("base_url", "http://localhost:11434"))
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", _CFG.get("ollama", {}).get("default_model", "qwen2.5:7b"))
 VISION_MODEL = os.getenv("VISION_MODEL", _CFG.get("ollama", {}).get("vision_model", "qwen2.5vl:7b"))
+SKIP_THINK = os.getenv("SKIP_THINK", "").lower() in ("1", "true", "yes")
+SKIP_TOOLS = os.getenv("SKIP_TOOLS", "").lower() in ("1", "true", "yes")
 
 SAVE_TURNS = os.getenv("LOG_SAVE_TURNS", str(_CFG.get("logging", {}).get("save_turns", True))).lower() in ("1", "true", "yes")
 SAVE_TRAINING = os.getenv("LOG_SAVE_TRAINING", str(_CFG.get("logging", {}).get("save_training_data", True))).lower() in ("1", "true", "yes")
@@ -272,66 +274,40 @@ async def process_message_stream(
 
     has_images = any(a["type"] == "image" for a in attachments_meta)
 
-    # ── Image routing ─────────────────────────────────────────────
+    # ── Image routing: all models use pre-analysis ────────────────
+    # Images are decoded to temp files, analyzed by vision model,
+    # results injected as text. This is faster and more reliable than
+    # sending base64 inline (Ollama VL models reject some formats).
     if has_images:
-        if model_cap.is_multimodal and decoded_attachments:
-            # VL model: replace original base64 with resized version.
-            # Resized data URL is available in decoded_attachments.
-            resized_map = {}
-            for att in decoded_attachments:
-                if att.get("data_url_resized"):
-                    resized_map[att.get("original_url", "")[:80]] = att["data_url_resized"]
+        logger.info("Pre-analyzing images with %s", model_cap.vision_model)
+        vision_results = []
+        for att in decoded_attachments:
+            if att.get("type") == "image" and att.get("path"):
+                try:
+                    yield _sse_chunk({
+                        "choices": [{"index": 0, "delta": {
+                            "content": "\n🔍 analyzing image...\n"
+                        }, "finish_reason": None}],
+                    })
 
-            if resized_map:
-                # Rewrite messages to use resized data URLs
-                for msg in messages:
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        for part in content:
-                            if isinstance(part, dict) and part.get("type") == "image_url":
-                                img = part.get("image_url", {})
-                                url = img.get("url", "") if isinstance(img, dict) else ""
-                                # Match by URL prefix
-                                for orig_prefix, resized_url in resized_map.items():
-                                    if isinstance(url, str) and url[:60] in orig_prefix or url[:60] == orig_prefix[:60]:
-                                        if isinstance(img, dict):
-                                            img["url"] = resized_url
-                                        break
-                logger.info("VL model '%s': images resized and sent inline", model_name)
-            else:
-                logger.info("VL model '%s': images sent inline (no resize needed)", model_name)
-        elif not model_cap.is_multimodal:
-            logger.info("Non-VL model '%s': pre-analyzing images with %s",
-                        model_name, model_cap.vision_model)
-            vision_results = []
-            for att in decoded_attachments:
-                if att.get("type") == "image" and att.get("path"):
-                    try:
-                        # Yield progress indicator so client doesn't time out
-                        yield _sse_chunk({
-                            "choices": [{"index": 0, "delta": {
-                                "content": f"\n\u0001\u0002 analyzing image...\n"
-                            }, "finish_reason": None}],
-                        })
+                    import os as _os
+                    _os.environ["VISION_MODEL"] = model_cap.vision_model
+                    from paradise.tools.vision_analyze import _handle_vision_analyze
+                    result_str = await _handle_vision_analyze({
+                        "path": att["path"],
+                        "question": text_only or "描述这张图片的内容",
+                    })
+                    import json as _json
+                    result = _json.loads(result_str) if isinstance(result_str, str) else result_str
+                    desc = result.get("description", "")
+                    if desc:
+                        vision_results.append(f"[图片分析结果] {desc}")
+                        logger.info("Vision pre-analysis: %s → %s", att["path"], desc[:100])
+                except Exception as ve:
+                    logger.warning("Vision pre-analysis failed: %s", ve)
 
-                        import os as _os
-                        _os.environ["VISION_MODEL"] = model_cap.vision_model
-                        from paradise.tools.vision_analyze import _handle_vision_analyze
-                        result_str = await _handle_vision_analyze({
-                            "path": att["path"],
-                            "question": text_only or "描述这张图片的内容",
-                        })
-                        import json as _json
-                        result = _json.loads(result_str) if isinstance(result_str, str) else result_str
-                        desc = result.get("description", "")
-                        if desc:
-                            vision_results.append(f"[图片分析结果] {desc}")
-                            logger.info("Vision pre-analysis: %s → %s", att["path"], desc[:100])
-                    except Exception as ve:
-                        logger.warning("Vision pre-analysis failed: %s", ve)
-
-            if vision_results:
-                text_only = text_only + "\n\n" + "\n".join(vision_results)
+        if vision_results:
+            text_only = text_only + "\n\n" + "\n".join(vision_results)
 
     # ── Turn logger ───────────────────────────────────────────────
     turn = session_manager.next_turn(conv_id)
@@ -368,12 +344,16 @@ async def process_message_stream(
 
     # ── Model routing info for agent ───────────────────────────────
     ctx._model_cap = model_cap
-    if model_cap.tools_prompt:
-        # Non-instruct model: use system-prompt ReAct for tools
+    if SKIP_TOOLS:
+        ctx.enable_tools = False
+        logger.info("SKIP_TOOLS=1 — tool phase disabled")
+    if SKIP_THINK:
+        ctx._skip_think = True
+        logger.info("SKIP_THINK=1 — think phase disabled")
+    if model_cap.tools_prompt and not SKIP_TOOLS:
         ctx._tools_prompt = True
         logger.info("Model '%s' → system-prompt ReAct mode", model_name)
     if model_cap.is_multimodal:
-        # VL model handles images inline — skip vision_analyze
         ctx._skip_vision_tool = True
 
     # ── Context compaction ───────────────────────────────────────────
@@ -395,9 +375,8 @@ async def process_message_stream(
             logger.warning("Context compaction failed: %s", e)
             # Continue with original messages
 
-    # Pass raw (possibly compacted) messages to agent for direct use.
-    # Strip image_url parts for non-VL models — vision_analyze tool handles images.
-    if has_images and not model_cap.is_multimodal:
+    # All models use pre-analysis — strip image_url parts from messages
+    if has_images:
         messages = _strip_image_parts(messages)
 
     ctx._raw_messages = messages

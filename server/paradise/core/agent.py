@@ -165,9 +165,9 @@ class ParadiseAgent:
                 elif event.get("type") == "tool_results":
                     tool_results = event.get("content", "")
 
-        # Phase 2: THINK (with tool context, streaming if possible)
+        # Phase 2: THINK (skip if ctx._skip_think flag set)
         thinking_text = ""
-        if _should_think(ctx.user_message):
+        if _should_think(ctx.user_message) and not getattr(ctx, '_skip_think', False):
             thinking_text = await self._think_phase(ctx, tool_results)
             if thinking_text:
                 # Include tool summary in thinking if tools were used

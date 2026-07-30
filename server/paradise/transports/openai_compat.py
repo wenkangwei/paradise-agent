@@ -258,7 +258,14 @@ class OpenAICompatTransport(ProviderTransport):
                 async with client.stream(
                     "POST", url, json=payload, headers=headers,
                 ) as resp:
-                    resp.raise_for_status()
+                    # Check status without touching body (avoids httpx streaming error)
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        raise TransportError(
+                            f"OpenAI-compat stream failed: {resp.status_code} {body.decode()[:300]}",
+                            provider="openai_compat",
+                            status_code=resp.status_code,
+                        )
 
                     tool_call_buffers: dict[int, dict] = {}
 
