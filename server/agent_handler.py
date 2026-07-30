@@ -275,13 +275,39 @@ async def process_message_stream(
     # ── Image routing ─────────────────────────────────────────────
     if has_images:
         if model_cap.is_multimodal:
-            # VL model: images go directly inline — no vision_analyze tool needed.
-            # Keep full_content as-is (list with text + image_url parts)
             logger.info("VL model '%s': images sent inline (no vision tool)", model_name)
         else:
-            # Non-VL model: decoded attachments + vision_analyze tool will handle images
-            logger.info("Non-VL model '%s': images routed to vision_analyze tool (vision=%s)",
+            logger.info("Non-VL model '%s': pre-analyzing images with %s",
                         model_name, model_cap.vision_model)
+            vision_results = []
+            for att in decoded_attachments:
+                if att.get("type") == "image" and att.get("path"):
+                    try:
+                        # Yield progress indicator so client doesn't time out
+                        yield _sse_chunk({
+                            "choices": [{"index": 0, "delta": {
+                                "content": f"\n\u0001\u0002 analyzing image...\n"
+                            }, "finish_reason": None}],
+                        })
+
+                        import os as _os
+                        _os.environ["VISION_MODEL"] = model_cap.vision_model
+                        from paradise.tools.vision_analyze import _handle_vision_analyze
+                        result_str = await _handle_vision_analyze({
+                            "path": att["path"],
+                            "question": text_only or "描述这张图片的内容",
+                        })
+                        import json as _json
+                        result = _json.loads(result_str) if isinstance(result_str, str) else result_str
+                        desc = result.get("description", "")
+                        if desc:
+                            vision_results.append(f"[图片分析结果] {desc}")
+                            logger.info("Vision pre-analysis: %s → %s", att["path"], desc[:100])
+                    except Exception as ve:
+                        logger.warning("Vision pre-analysis failed: %s", ve)
+
+            if vision_results:
+                text_only = text_only + "\n\n" + "\n".join(vision_results)
 
     # ── Turn logger ───────────────────────────────────────────────
     turn = session_manager.next_turn(conv_id)
