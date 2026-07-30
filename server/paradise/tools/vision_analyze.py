@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # ── Config ──────────────────────────────────────────────────────────
 
-VISION_MODEL = os.getenv("VISION_MODEL", "llava:7b")
+VISION_MODEL = os.getenv("VISION_MODEL", "qwen2.5vl:7b")
 OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 SUPPORTED_IMAGE_TYPES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}

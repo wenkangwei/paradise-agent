@@ -345,7 +345,11 @@ async def process_message_stream(
             logger.warning("Context compaction failed: %s", e)
             # Continue with original messages
 
-    # Pass raw (possibly compacted) messages to agent for direct use
+    # Pass raw (possibly compacted) messages to agent for direct use.
+    # Strip image_url parts for non-VL models — vision_analyze tool handles images.
+    if has_images and not model_cap.is_multimodal:
+        messages = _strip_image_parts(messages)
+
     ctx._raw_messages = messages
     if _compact_context:
         ctx._compact_context = _compact_context
@@ -524,6 +528,29 @@ async def process_message_stream(
 def _sse_chunk(data: dict) -> bytes:
     """Format a dict as an SSE 'data:' chunk."""
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def _strip_image_parts(messages: list[dict]) -> list[dict]:
+    """Remove image_url content parts from messages for non-VL models.
+
+    Text parts are preserved; image_url parts are replaced with a brief
+    note pointing to the vision_analyze tool result.
+    """
+    cleaned = []
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        text_parts.append(part.get("text", ""))
+                    # Skip image_url parts — handled by vision_analyze tool
+            new_content = " ".join(text_parts) if text_parts else content
+            cleaned.append({**msg, "content": new_content})
+        else:
+            cleaned.append(msg)
+    return cleaned
 
 
 def _tool_emoji(name: str) -> str:

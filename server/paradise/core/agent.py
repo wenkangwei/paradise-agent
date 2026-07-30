@@ -487,8 +487,8 @@ class ParadiseAgent:
                 yield {"type": "done"}
 
         except Exception as e:
-            logger.error("[Paradise] Respond phase error: %s", e)
-            yield {"type": "error", "content": str(e)}
+            logger.error("[Paradise] Respond phase error: %s", e, exc_info=True)
+            yield {"type": "error", "content": f"Respond error: {e}"}
 
     # ── Phase 4: REFLECT ────────────────────────────────────────
 

@@ -362,7 +362,10 @@ class OpenAICompatTransport(ProviderTransport):
             ) as client:
                 resp = await client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
-                data = resp.json()
+                # Read body fully before parsing — avoids httpx streaming errors
+                raw = resp.text
+                import json as _json
+                data = _json.loads(raw)
         except httpx.HTTPStatusError as exc:
             raise TransportError(
                 f"OpenAI-compat chat failed: {exc.response.status_code} "
