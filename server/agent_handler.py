@@ -246,7 +246,8 @@ def _build_channel_history(messages: list[dict], conv_id: str) -> Channel:
 async def process_message_stream(
     messages: list[dict],
     model: str,
-    conv_id: str = ""
+    conv_id: str = "",
+    user_profile: str = ""
 ) -> AsyncGenerator[str, None]:
     """Process chat messages through the Paradise agent, yielding SSE chunks.
 
@@ -394,6 +395,10 @@ async def process_message_stream(
     if _compact_context:
         ctx._compact_context = _compact_context
 
+    # ── User profile from Android app ────────────────────────────────
+    if user_profile:
+        ctx._user_profile = user_profile
+
     try:
         # Phase 0: Intent check (needs_tools)
         from paradise.core.agent import _needs_tools, _should_think
@@ -485,18 +490,31 @@ async def process_message_stream(
                 })
                 # web_search: emit results as structured ToolCard for Android UI
                 if tool_name == "web_search":
+                    query = event.get('arguments', {}).get('query', '')
                     cards = _parse_search_result_cards(event.get("result", ""))
                     if cards:
+                        # Emit tool_cards for SearchResultsSection button
                         yield _sse_chunk({
                             "choices": [{
                                 "index": 0,
                                 "delta": {
                                     "tool_cards": [{
                                         "type": "search_results",
-                                        "title": f"Search: {event.get('arguments', {}).get('query', '')}",
+                                        "title": f"搜索: {query}",
                                         "results": cards,
                                     }]
                                 },
+                                "finish_reason": None,
+                            }],
+                        })
+                        # Emit search summary into reasoning for thinking section
+                        lines = [f"\n[搜索词]: {query}", f"[搜索结果]:"]
+                        for c in cards[:5]:
+                            lines.append(f"  - {c.get('title', '')}")
+                        yield _sse_chunk({
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"reasoning_content": "\n".join(lines) + "\n"},
                                 "finish_reason": None,
                             }],
                         })

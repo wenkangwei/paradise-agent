@@ -93,14 +93,32 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
     logger.info("web_search: '%s' (limit=%d, backend=%s)", query, limit, backend)
 
     try:
-        if backend == "brave":
-            result = _search_brave(query, limit)
-        elif backend == "searxng":
-            result = _search_searxng(query, limit)
-        else:
-            result = _search_bing(query, limit)
+        # ── Query rewriting ─────────────────────────────────────
+        search_queries = [query]
+        rewritten = await _rewrite_query(query)
+        if rewritten:
+            for rq in rewritten:
+                if rq and rq != query:
+                    search_queries.append(rq)
+        logger.info("web_search queries: %s", search_queries)
 
-        web_results = result.get("data", {}).get("web", [])
+        # ── Search with all queries ─────────────────────────────
+        all_results = []
+        seen_urls = set()
+        for q in search_queries:
+            if backend == "brave":
+                result = _search_brave(q, limit)
+            elif backend == "searxng":
+                result = _search_searxng(q, limit)
+            else:
+                result = _search_bing(q, limit)
+            for r in result.get("data", {}).get("web", []):
+                url = r.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_results.append(r)
+
+        web_results = all_results[:limit]
         result_count = len(web_results)
         logger.info("web_search: %d results for '%s'", result_count, query)
 
@@ -362,6 +380,51 @@ def _clean_html(text: str) -> str:
     text = re.sub(r'&#\d+;', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
+
+# ── Query Rewriting ─────────────────────────────────────────────
+
+async def _rewrite_query(query: str) -> list[str]:
+    """Ask a fast LLM to rewrite/expand the search query for better results.
+
+    Returns up to 2 rewritten variations (not including the original).
+    """
+    if os.getenv("WEB_SEARCH_REWRITE", "1") in ("0", "false", "no"):
+        return []
+
+    ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    model = os.getenv("QUERY_REWRITE_MODEL", "qwen2.5:3b")
+
+    prompt = (
+        "Rewrite the following search query into 1-2 alternative phrasings "
+        "that would get better search results. Output each on a new line. "
+        "Keep them concise and relevant. Do NOT add numbering or prefixes.\n\n"
+        f"Query: {query}\n\nRewritten:"
+    )
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0),
+        ) as client:
+            resp = await client.post(
+                f"{ollama_base.rstrip('/')}/v1/chat/completions",
+                json={
+                    "model": model,
+                    "stream": False,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 100,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            lines = [l.strip() for l in content.strip().split("\n") if l.strip()]
+            return lines[:2]
+    except Exception as e:
+        logger.debug("Query rewrite failed: %s", e)
+        return []
 
 
 # ── RAG Summarization ────────────────────────────────────────────

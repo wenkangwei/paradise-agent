@@ -171,13 +171,6 @@ class ParadiseAgent:
         if _should_think(ctx.user_message) and not getattr(ctx, '_skip_think', False):
             thinking_text = await self._think_phase(ctx, tool_results)
             if thinking_text:
-                # Include tool summary in thinking if tools were used
-                if tool_events:
-                    tool_summary = "\n".join(
-                        f"工具 {e.get('name', '?')}: {e.get('result', '')[:100]}"
-                        for e in tool_events
-                    )
-                    thinking_text = f"{thinking_text}\n\n[工具执行记录]\n{tool_summary}"
                 yield {"type": "thinking", "content": thinking_text}
 
         # Phase 3: RESPOND (streaming)
@@ -430,8 +423,15 @@ class ParadiseAgent:
         are passed through directly for conversation continuity.
         """
         # Minimal system prompt for AiChat Android use case
+        from datetime import datetime
         agent_name = ctx.agent_name or "AI助手"
-        base_prompt = f"你是{agent_name}，一个有用的AI助手。\n"
+        now = datetime.now().strftime("%Y年%m月%d日 %H:%M")
+        base_prompt = f"当前时间: {now}\n你是{agent_name}，一个有用的AI助手。\n"
+
+        # Add user profile if available
+        user_profile = getattr(ctx, '_user_profile', '') or ''
+        if user_profile:
+            base_prompt += f"用户信息: {user_profile}\n"
         if tool_results:
             base_prompt += (
                 "你刚才使用了搜索工具获取了信息。请基于搜索结果简洁回答用户问题。\n"

@@ -41,8 +41,9 @@ object NetworkModule {
     @Singleton
     fun provideLlmProviderFactory(
         registry: SupplierRegistry,
-        streamClient: AiStreamClient
-    ): LlmProviderFactory = LlmProviderFactoryImpl(registry, streamClient)
+        streamClient: AiStreamClient,
+        userProfileRepo: com.example.aichat.data.repository.UserProfileRepository
+    ): LlmProviderFactory = LlmProviderFactoryImpl(registry, streamClient, userProfileRepo)
 
     @Provides
     @Singleton

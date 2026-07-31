@@ -49,7 +49,8 @@ interface LlmProviderFactory {
 @Singleton
 class LlmProviderFactoryImpl @Inject constructor(
     private val supplierRegistry: SupplierRegistry,
-    private val streamClient: AiStreamClient
+    private val streamClient: AiStreamClient,
+    private val userProfileRepo: com.example.aichat.data.repository.UserProfileRepository
 ) : LlmProviderFactory {
 
     private val cache = object : LinkedHashMap<String, LlmProvider>(CACHE_INITIAL, 0.75f, true) {
@@ -68,7 +69,8 @@ class LlmProviderFactoryImpl @Inject constructor(
         val cacheKey = "${profile.id}@${profile.updatedAt}"
         return cache.getOrPut(cacheKey) {
             val supplier = supplierRegistry.byId(profile.supplierId) ?: CustomSupplier
-            OpenAiCompatibleProvider(profile, supplier, streamClient)
+            val userProfile = userProfileRepo.get().toHeaderValue()
+            OpenAiCompatibleProvider(profile, supplier, streamClient, userProfile)
         }
     }
 
@@ -88,7 +90,8 @@ class LlmProviderFactoryImpl @Inject constructor(
 private class OpenAiCompatibleProvider(
     private val profile: ApiProfileEntity,
     private val supplier: Supplier,
-    private val streamClient: AiStreamClient
+    private val streamClient: AiStreamClient,
+    private val userProfileHeader: String = ""
 ) : LlmProvider {
 
     private val apiService: AiApiService = buildStack()
@@ -228,6 +231,7 @@ private class OpenAiCompatibleProvider(
             val builder = chain.request().newBuilder()
                 .addHeader("Authorization", "Bearer ${profile.apiKeyEncrypted}")
                 .addHeader("Content-Type", "application/json")
+                .apply { if (userProfileHeader.isNotBlank()) addHeader("X-User-Profile", userProfileHeader) }
                 .addHeader("Accept", "text/event-stream")
                 // SSE 必须禁用 gzip。反向代理（ZeroNews/cpolar）如果压缩
                 // chunked transfer 的 SSE 流，OkHttp 会在解压时只读到缓冲的

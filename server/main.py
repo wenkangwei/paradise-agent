@@ -65,12 +65,13 @@ async def agent_chat_completions(request: Request, body: AgentChatRequest):
         )
 
     conv_id = request.headers.get("X-Conversation-Id", "")
+    user_profile = request.headers.get("X-User-Profile", "")
     model = body.model or DEFAULT_MODEL
     messages = [m.model_dump(exclude_none=True) for m in body.messages]
 
     if body.stream:
         return StreamingResponse(
-            process_message_stream(messages, model, conv_id),
+            process_message_stream(messages, model, conv_id, user_profile),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

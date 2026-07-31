@@ -201,13 +201,14 @@ fun MessageBubble(
                                 if (message.content.isNotBlank()) Spacer(Modifier.height(8.dp))
                             }
 
-                            // Search results (RAG) — only for AI + when metadata carries them
+                            // Search results button — opens full-screen card list
                             if (!isUser) {
                                 message.metadata?.searchResults?.takeIf { it.isNotEmpty() }?.let { results ->
                                     SearchResultsSection(results = results)
                                     if (message.content.isNotBlank()) Spacer(Modifier.height(8.dp))
                                 }
                             }
+
 
                             if (message.content.isNotBlank()) {
                                 if (isUser) {

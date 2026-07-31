@@ -9,6 +9,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.aichat.feature.profile.PlaceholderPage
 import com.example.aichat.feature.profile.SettingsHomePage
+import com.example.aichat.feature.profile.UserProfilePage
 import com.example.aichat.feature.profile.SettingsRoute
 import com.example.aichat.feature.profile.apiconfig.ApiConfigEditPage
 import com.example.aichat.feature.profile.apiconfig.ApiConfigListPage
@@ -89,7 +90,7 @@ fun AppNavGraph(
         }
 
         // Placeholder pages — each replaceable with a real implementation
-        composable(SettingsRoute.PROFILE) { PlaceholderPage("个人资料", back) }
+        composable(SettingsRoute.PROFILE) { UserProfilePage(onNavigateBack = back) }
         composable(SettingsRoute.ACCOUNT_SECURITY) { PlaceholderPage("账号安全", back) }
         composable(SettingsRoute.AGENT_LIST) { PlaceholderPage("Agent 配置", back) }
         composable(SettingsRoute.APPEARANCE) { PlaceholderPage("主题设置", back) }
