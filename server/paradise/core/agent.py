@@ -252,6 +252,15 @@ class ParadiseAgent:
                         name = tc.name
                         args = json.loads(tc.arguments) if isinstance(tc.arguments, str) else tc.arguments
 
+                    # Inject context for web_search query rewriting
+                    if name == "web_search":
+                        from datetime import datetime as _dt2
+                        ctx_parts = [f"Current time: {_dt2.now().strftime('%Y-%m-%d %H:%M')}"]
+                        user_profile = getattr(ctx, '_user_profile', '') or ''
+                        if user_profile:
+                            ctx_parts.append(f"User: {user_profile}")
+                        args["_context"] = "\n".join(ctx_parts)
+
                     tool_result = await execute_tool(name, args)
                     elapsed = (_time.time() - t0) * 1000
 

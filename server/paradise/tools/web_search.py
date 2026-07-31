@@ -432,23 +432,33 @@ def _clean_html(text: str) -> str:
 # ── Query Rewriting ─────────────────────────────────────────────
 
 async def _rewrite_query(query: str, context: str = "") -> list[str]:
-    """Ask a fast LLM to suggest alternative search keywords.
+    """Use LLM to rewrite the search query with context awareness.
 
-    Returns up to 2 variations. Context is deliberately NOT passed to the
-    LLM prompt — small models hallucinate when given too much context.
+    Uses qwen2.5:7b-instruct (configurable) — smarter model can handle
+    date/user/location context without hallucinating.
+    Returns up to 2 variations.
     """
     if os.getenv("WEB_SEARCH_REWRITE", "1") in ("0", "false", "no"):
         return []
 
     ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    model = os.getenv("QUERY_REWRITE_MODEL", "qwen2.5:3b")
+    model = os.getenv("QUERY_REWRITE_MODEL", "qwen2.5:7b-instruct")
+
+    context_block = ""
+    if context:
+        context_block = f"\nContext:\n{context}\n"
 
     prompt = (
-        "Given this search query, write 1-2 alternative keyword combinations "
-        "that mean EXACTLY the same thing. Do NOT change the meaning, topic, "
-        "or time period. Just rephrase for better search results.\n\n"
-        f"Query: {query}\n\n"
-        "Rewritten (one per line, no numbering):"
+        "You are a search query optimizer. Given the user's query and context, "
+        "rewrite it into 1-2 better search keyword combinations.\n\n"
+        "Rules:\n"
+        "- Resolve relative time references: '今年'→'2026年', '去年'→'2025年'\n"
+        "- Add location if relevant (e.g., '天气'→'北京天气')\n"
+        "- Keep the EXACT same intent, don't change the topic\n"
+        "- Use concise search keywords\n"
+        f"{context_block}"
+        f"Original query: {query}\n\n"
+        "Output ONLY the rewritten queries, one per line. No numbering."
     )
 
     try:
