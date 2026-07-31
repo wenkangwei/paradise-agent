@@ -29,10 +29,11 @@ logger = logging.getLogger(__name__)
 
 # ── Config ──────────────────────────────────────────────────────────
 
-BING_SEARCH_URL = "https://www.bing.com/search"
+BING_SEARCH_URL = "https://cn.bing.com/search"
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 TIMEOUT = 15.0
-MAX_RESULTS_DEFAULT = int(os.getenv("WEB_SEARCH_DEFAULT_LIMIT", "10"))
+MAX_RESULTS_DEFAULT = int(os.getenv("WEB_SEARCH_DEFAULT_LIMIT", "15"))
+FETCH_COUNT_DEFAULT = int(os.getenv("WEB_SEARCH_FETCH_COUNT", "5"))
 SEARCH_EMOJI = "\U0001f50d"
 
 
@@ -172,7 +173,7 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
         # ── RAG Pipeline: Search → Fetch → Summarize → Format ──────
         auto_fetch = os.getenv("WEB_SEARCH_AUTO_FETCH", "1") not in ("0", "false", "no")
         auto_summarize = os.getenv("WEB_SEARCH_AUTO_SUMMARIZE", "1") not in ("0", "false", "no")
-        fetch_count = min(int(os.getenv("WEB_SEARCH_FETCH_COUNT", "3")), 5)
+        fetch_count = min(int(os.getenv("WEB_SEARCH_FETCH_COUNT", str(FETCH_COUNT_DEFAULT))), 10)
 
         if auto_fetch and web_results:
             urls = [r["url"] for r in web_results[:fetch_count] if r.get("url")]
@@ -251,72 +252,54 @@ def _search_bing(query: str, limit: int) -> dict:
 def _parse_bing_html(html: str, limit: int) -> list[dict]:
     """Extract search results from Bing HTML.
 
-    Bing search result structure (varies, so we try multiple strategies):
-      <li class="b_algo">
-        <h2><a href="...">Title</a></h2>
-        <p>Description snippet...</p>
-        <div class="b_caption">...</div>
-      </li>
+    Uses two strategies:
+    1. b_algo blocks → structured extraction (title + desc + url)
+    2. Broad link extraction with quality scoring (fallback)
     """
     results = []
+    seen_urls = set()
 
-    # Strategy 1: find result blocks by class
-    # Bing's main result container uses b_algo class
-    block_pattern = re.compile(
-        r'<li[^>]*class=["\'][^"\']*b_algo[^"\']*["\'][^>]*>(.*?)</li>',
-        re.DOTALL | re.IGNORECASE,
-    )
-    blocks = block_pattern.findall(html)
+    # Strategy 1: b_algo result blocks
+    # Split on <li class="b_algo to handle nested <li> elements
+    blocks = re.split(r'<li\b[^>]*\bclass=["\'][^"\']*b_algo', html, flags=re.IGNORECASE)[1:]
 
     for block in blocks:
         if len(results) >= limit:
             break
 
-        # Extract title + URL from <h2><a href="...">Title</a></h2>
+        # Extract first meaningful link
         link_match = re.search(
             r'<a[^>]*href=["\'](https?://[^"\']+)["\'][^>]*>(.+?)</a>',
             block, re.DOTALL | re.IGNORECASE,
         )
-
-        if not link_match:
-            # Try looser link pattern
-            link_match = re.search(
-                r'<a[^>]*href=["\']([^"\']+)["\'][^>]*>(.+?)</a>',
-                block, re.DOTALL | re.IGNORECASE,
-            )
-
         if not link_match:
             continue
 
         url = link_match.group(1).strip()
-        title = _clean_html(link_match.group(2))
-
-        if not title or "bing.com" in url.lower():
+        if url in seen_urls or "bing.com" in url.lower():
             continue
 
-        # Extract description from <p> or <div class="b_caption">
+        title = _clean_html(link_match.group(2))
+        if not title or len(title) < 3:
+            continue
+
+        # Extract snippet — look for <p> or caption div
         desc_match = re.search(
-            r'<(?:p|div)[^>]*class=["\'][^"\']*b_(?:caption|snippet|line|algoSlug)[^"\']*["\'][^>]*>(.*?)</(?:p|div)>',
+            r'<(?:p|div)[^>]*class=["\'][^"\']*(?:b_caption|b_snippet|b_line|b_algoSlug)[^"\']*["\'][^>]*>(.*?)</(?:p|div)>',
             block, re.DOTALL | re.IGNORECASE,
         )
         if not desc_match:
-            # Fallback: first <p> in the block
-            desc_match = re.search(
-                r'<p[^>]*>(.*?)</p>',
-                block, re.DOTALL | re.IGNORECASE,
-            )
+            desc_match = re.search(r'<p[^>]*>(.*?)</p>', block, re.DOTALL | re.IGNORECASE)
 
         description = _clean_html(desc_match.group(1)) if desc_match else ""
-
+        seen_urls.add(url)
         results.append({
-            "title": title,
-            "url": url,
-            "description": description,
+            "title": title, "url": url, "description": description,
             "position": len(results) + 1,
         })
 
-    # Strategy 2: fallback — broader link extraction
-    if not results:
+    # Strategy 2: if still not enough results, broad link extraction
+    if len(results) < 5:
         link_pattern = re.compile(
             r'<a[^>]*href=["\'](https?://[^"\']+)["\'][^>]*>(.+?)</a>',
             re.DOTALL | re.IGNORECASE,
@@ -324,15 +307,14 @@ def _parse_bing_html(html: str, limit: int) -> list[dict]:
         for url, title in link_pattern.findall(html):
             if len(results) >= limit:
                 break
+            url = url.strip()
             title = _clean_html(title)
-            if (title and url
-                    and "bing.com" not in url
-                    and "microsoft.com" not in url
-                    and len(title) > 2):
+            if (url not in seen_urls and title and len(title) > 3
+                    and "bing.com" not in url and "microsoft.com" not in url
+                    and not url.endswith(('.css', '.js', '.png', '.jpg', '.ico'))):
+                seen_urls.add(url)
                 results.append({
-                    "title": title,
-                    "url": url,
-                    "description": "",
+                    "title": title, "url": url, "description": "",
                     "position": len(results) + 1,
                 })
 
@@ -421,9 +403,9 @@ def _clean_html(text: str) -> str:
     text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
     text = text.replace("&quot;", '"').replace("&#39;", "'").replace("&#x27;", "'")
     text = text.replace("&nbsp;", " ").replace("&middot;", "·").replace("&ensp;", " ")
-    # Remove duplicate URL fragments in title (e.g. "python.orghttps://...")
-    text = re.sub(r'https?://\S+', '', text)
-    # Remove numeric HTML entities (&#0183; etc.)
+    # Remove URL fragments (e.g. "baidu.comhttps://...", "python.orghttps://...")
+    text = re.sub(r'(?:https?://|www\.)\S+', '', text)
+    # Remove numeric HTML entities
     text = re.sub(r'&#\d+;', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
@@ -449,16 +431,21 @@ async def _rewrite_query(query: str, context: str = "") -> list[str]:
         context_block = f"\nContext:\n{context}\n"
 
     prompt = (
-        "You are a search query optimizer. Given the user's query and context, "
-        "rewrite it into 1-2 better search keyword combinations.\n\n"
+        "Given the user's query, write 3 search keyword combinations using "
+        "COMPLETELY DIFFERENT words for each. Think of different ways someone "
+        "might search for the same information.\n\n"
+        "Example:\n"
+        "  Original: 26年世界杯参赛队\n"
+        "  Variation 1: 2026 FIFA World Cup qualified teams list\n"
+        "  Variation 2: 2026世界杯 32强 名单\n"
+        "  Variation 3: 美加墨世界杯 参赛国家\n\n"
         "Rules:\n"
-        "- Resolve relative time references: '今年'→'2026年', '去年'→'2025年'\n"
-        "- Add location if relevant (e.g., '天气'→'北京天气')\n"
-        "- Keep the EXACT same intent, don't change the topic\n"
-        "- Use concise search keywords\n"
+        "- Resolve time: '26年'→'2026年', '今年'→'2026年'\n"
+        "- Each variation MUST use different keywords\n"
+        "- Mix Chinese and English for better coverage\n"
         f"{context_block}"
-        f"Original query: {query}\n\n"
-        "Output ONLY the rewritten queries, one per line. No numbering."
+        f"Original: {query}\n\n"
+        "3 variations (one per line):"
     )
 
     try:
