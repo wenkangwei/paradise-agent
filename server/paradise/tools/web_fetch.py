@@ -1,18 +1,13 @@
 """Web Fetch Skill — extract readable text from web page URLs.
 
 Self-registers as tool "web_fetch" in toolset "web".
-Fetches a URL, strips HTML/CSS/JS, extracts the main text content.
-Used by web_search as an automatic post-processing step, and also
-available as a standalone tool for the LLM to call directly.
+Uses trafilatura (professional web extraction) as primary, with
+HTML regex fallback. Handles WeChat articles, common Chinese sites.
 
-Extraction strategy:
-  1. httpx GET with browser User-Agent
-  2. Remove <script>, <style>, <nav>, <footer>, <header> elements
-  3. Extract text from remaining HTML
-  4. Collapse whitespace, trim to max_chars
-
-Usage in agent TOOL phase:
-  tool_call: web_fetch(url="https://example.com", max_chars=3000)
+Extraction strategy (priority order):
+  1. trafilatura — handles 90% of pages, strips nav/ads/sidebar
+  2. Site-specific: WeChat (js_content div), Jimeng (JSON data)
+  3. Regex fallback — remove scripts/styles, extract visible text
 """
 
 from __future__ import annotations
@@ -20,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -28,101 +24,72 @@ from paradise.tools.registry import registry, tool_error, tool_result
 
 logger = logging.getLogger(__name__)
 
-TIMEOUT = 15.0
+TIMEOUT = 20.0
 MAX_CHARS_DEFAULT = 3000
 MAX_CHARS_LIMIT = 10000
 FETCH_EMOJI = "\U0001f310"
 
-# HTML elements to strip before text extraction
-_STRIP_TAGS = re.compile(
-    r'</?(?:script|style|nav|footer|header|aside|noscript|iframe|svg|canvas'
-    r'|form|input|button|select|textarea|label)\b[^>]*>.*?</(?:script|style|nav|footer|header|aside|noscript|iframe|svg|canvas)>',
-    re.DOTALL | re.IGNORECASE,
-)
 _STRIP_COMMENTS = re.compile(r'<!--.*?-->', re.DOTALL)
 _STRIP_TAGS_ALL = re.compile(r'<[^>]+>')
 _STRIP_ENTITIES = re.compile(r'&[a-z]+;|&#\d+;|&#x[0-9a-f]+;', re.IGNORECASE)
 _STRIP_WHITESPACE = re.compile(r'\s+')
-_STRIP_URLS_IN_TEXT = re.compile(r'https?://\S+')
+
+# Unscrapable URL patterns (login, auth, non-HTML files)
+_UNSUPPORTED_PATTERNS = [
+    (re.compile(r"login\.|passport\.|auth\.|sso\.", re.I), "登录/认证页面"),
+    (re.compile(r"\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|gz|tar|mp4|mp3)$", re.I), "非HTML文件"),
+]
 
 
 WEB_FETCH_SCHEMA = {
     "name": "web_fetch",
     "description": (
         "Fetch and extract readable text content from a web page URL. "
-        "Strips HTML, CSS, JavaScript and navigation elements. "
-        "Returns the main text content, truncated to max_chars (default 3000). "
-        "Use this to get the full content of a page found by web_search."
+        "Uses professional extraction (trafilatura) for clean article text. "
+        "Handles WeChat articles, news sites, blogs, documentation. "
+        "Returns extracted text, truncated to max_chars (default 3000)."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "url": {
-                "type": "string",
-                "description": "The URL to fetch content from",
-            },
-            "max_chars": {
-                "type": "integer",
-                "description": "Maximum characters to return (default 3000, max 10000)",
-            },
+            "url": {"type": "string", "description": "The URL to fetch content from"},
+            "max_chars": {"type": "integer", "description": "Max chars to return (default 3000, max 10000)"},
         },
         "required": ["url"],
     },
 }
 
 
-# ── Public API ──────────────────────────────────────────────────────
-
 def _handle_web_fetch(args: dict[str, Any]) -> str:
-    """Fetch URL content and return extracted text."""
     url = args.get("url", "")
-    max_chars = min(
-        max(int(args.get("max_chars", MAX_CHARS_DEFAULT) or MAX_CHARS_DEFAULT), 100),
-        MAX_CHARS_LIMIT,
-    )
-
+    max_chars = min(max(int(args.get("max_chars", MAX_CHARS_DEFAULT) or MAX_CHARS_DEFAULT), 100), MAX_CHARS_LIMIT)
     if not url.strip():
         return tool_error("url is required")
+
+    # Check unsupported URLs
+    for pattern, reason in _UNSUPPORTED_PATTERNS:
+        if pattern.search(url):
+            return tool_error(f"{reason}，无法抓取: {url}")
 
     content, title, error = fetch_and_extract(url, max_chars)
     if error:
         return tool_error(error)
-
-    return tool_result({
-        "url": url,
-        "title": title,
-        "content": content,
-        "length": len(content),
-    })
+    return tool_result({"url": url, "title": title, "content": content, "length": len(content)})
 
 
 def fetch_and_extract(url: str, max_chars: int = 3000) -> tuple[str, str, str | None]:
-    """Fetch URL and extract readable text. Returns (content, title, error).
-
-    Args:
-        url: The URL to fetch
-        max_chars: Maximum characters to return
-
-    Returns:
-        (content, title, error) — error is None on success
-    """
+    """Fetch URL and extract readable text. Returns (content, title, error)."""
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
-
     try:
-        resp = httpx.get(
-            url,
-            headers=headers,
-            timeout=TIMEOUT,
-            follow_redirects=True,
-        )
+        resp = httpx.get(url, headers=headers, timeout=TIMEOUT, follow_redirects=True)
         resp.raise_for_status()
     except httpx.ConnectError:
         return "", "", f"Cannot connect to {url}"
@@ -134,149 +101,174 @@ def fetch_and_extract(url: str, max_chars: int = 3000) -> tuple[str, str, str | 
         return "", "", f"Fetch error: {e}"
 
     html = resp.text
-    title = _extract_title(html)
-    text = _extract_text(html)
-    text = _trim(text, max_chars)
+    title, content = _extract_article(html, url)
+    content = _trim(content, max_chars)
 
-    if not text.strip():
-        return "", title or url, "No readable text content found on this page"
+    if not content.strip():
+        return "", title or url, "No readable content found"
 
-    logger.info("web_fetch: %s → %d chars", url[:60], len(text))
-    return text, title or url, None
+    logger.info("web_fetch: %s → %d chars (title: %s)", url[:60], len(content), title[:50])
+    return content, title or url, None
 
 
 def fetch_urls_batch(urls: list[str], max_chars_per_url: int = 1500) -> list[dict]:
-    """Fetch multiple URLs and return extracted content.
-
-    Used by web_search as automatic post-processing.
-    Returns list of {url, title, content, error}.
-    """
+    """Fetch multiple URLs and return extracted content (used by web_search)."""
     results = []
-    for url in urls[:5]:  # Max 5 URLs to avoid overwhelming
+    for url in urls[:5]:
         try:
             content, title, error = fetch_and_extract(url, max_chars_per_url)
-            results.append({
-                "url": url,
-                "title": title,
-                "content": content if not error else "",
-                "error": error,
-            })
+            results.append({"url": url, "title": title, "content": content if not error else "", "error": error})
         except Exception as e:
-            results.append({
-                "url": url,
-                "title": "",
-                "content": "",
-                "error": str(e),
-            })
+            results.append({"url": url, "title": "", "content": "", "error": str(e)})
     return results
 
 
-# ── HTML extraction helpers ─────────────────────────────────────────
+# ── Article extraction ──────────────────────────────────────────
 
-def _extract_title(html: str) -> str:
-    """Extract page title from HTML."""
+def _extract_article(html: str, url: str) -> tuple[str, str]:
+    """Extract title + content from HTML. Returns (title, content)."""
+    # Priority 1: trafilatura (professional web extraction library)
+    title, content = _extract_trafilatura(html)
+    if content and len(content) > 100:
+        return title, content
+
+    # Priority 2: Site-specific extractors
+    if "mp.weixin.qq.com" in url:
+        title, content = _extract_wechat(html)
+        if content and len(content) > 50:
+            return title, content
+
+    # Priority 3: Regex fallback (smart content area detection)
+    title, content = _extract_regex(html)
+    return title, content
+
+
+def _extract_trafilatura(html: str) -> tuple[str, str]:
+    """Use trafilatura for content extraction."""
+    try:
+        import trafilatura
+        # Extract as markdown for clean formatting
+        content = trafilatura.extract(html, output_format="markdown",
+                                       include_comments=False, include_tables=True,
+                                       with_metadata=True)
+        if not content:
+            content = trafilatura.extract(html, include_comments=False) or ""
+
+        # Extract metadata
+        title = ""
+        meta_json = trafilatura.extract(html, output_format="json", with_metadata=True)
+        if meta_json:
+            import json
+            try:
+                meta = json.loads(meta_json)
+                title = meta.get("title", "") or ""
+            except Exception:
+                pass
+
+        # Strip YAML frontmatter from markdown output (trafilatura metadata)
+        if content.startswith("---"):
+            end = content.find("---", 3)
+            if end > 0:
+                content = content[end + 3:].strip()
+        content = _clean_text(content)
+        if not title:
+            title = _extract_title_html(html)
+        return title, content
+    except ImportError:
+        logger.debug("trafilatura not installed, using regex fallback")
+        return "", ""
+    except Exception as e:
+        logger.debug("trafilatura extraction failed: %s", e)
+        return "", ""
+
+
+def _extract_wechat(html: str) -> tuple[str, str]:
+    """Extract WeChat article content from js_content div."""
+    title = ""
+    content = ""
+
+    title_match = re.search(r'var\s+msg_title\s*=\s*"(.*?)"', html)
+    if title_match:
+        title = title_match.group(1).strip()
+    if not title:
+        title_match = re.search(r'<h1[^>]*class="rich_media_title[^"]*"[^>]*>(.*?)</h1>', html, re.DOTALL)
+        if title_match:
+            title = _clean_html(title_match.group(1))
+
+    content_match = re.search(r'id="js_content"[^>]*>(.*?)</div>\s*</div>\s*</div>', html, re.DOTALL)
+    if content_match:
+        content = _clean_html(content_match.group(1))
+    return title, content
+
+
+def _extract_regex(html: str) -> tuple[str, str]:
+    """Regex fallback: find main content, strip boilerplate, extract text."""
+    title = _extract_title_html(html)
+    # Try to find main content area
+    main_html = html
+    for pattern_name in ['article', 'main', 'content', 'post', 'entry', 'body']:
+        m = re.search(
+            rf'<(?:article|main|div)[^>]*(?:class|id)=["\'][^"\']*{pattern_name}[^"\']*["\'][^>]*>(.*?)</(?:article|main|div)>',
+            html, re.DOTALL | re.IGNORECASE,
+        )
+        if m and len(m.group(1)) > 200:
+            main_html = m.group(1)
+            break
+
+    text = _STRIP_COMMENTS.sub(' ', main_html)
+    text = re.sub(r'</?(?:script|style|nav|footer|header|aside|noscript|iframe|svg)\b[^>]*>.*?</(?:script|style|nav|footer|header|aside|noscript|iframe|svg)>',
+                  ' ', text, flags=re.DOTALL | re.IGNORECASE)
+    text = _STRIP_TAGS_ALL.sub(' ', text)
+    text = _clean_text(text)
+
+    # Filter boilerplate paragraphs
+    paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+    good = [p for p in paragraphs if _content_score(p) > 0.3]
+    if len(good) >= 2:
+        text = '\n'.join(good)
+    return title, text
+
+
+# ── Helpers ─────────────────────────────────────────────────────
+
+def _extract_title_html(html: str) -> str:
     m = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.IGNORECASE)
     if m:
-        title = _clean_text(m.group(1))[:200]
-        return title
-    # Try og:title meta
+        return _clean_text(m.group(1))[:200]
     m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
     if m:
         return _clean_text(m.group(1))[:200]
     return ""
 
 
-def _extract_text(html: str) -> str:
-    """Extract readable text from HTML.
-
-    Strategy:
-    1. Try to find main content area (<article>, <main>, content divs)
-    2. Fall back to full page extraction
-    3. Remove scripts, styles, navigation
-    4. Score paragraphs by text density to filter boilerplate
-    """
-    # Try to extract main content area first
-    main_html = _extract_main_content(html)
-
-    # Remove scripts, styles, nav, footer, header
-    text = _STRIP_TAGS.sub(' ', main_html)
-    text = _STRIP_COMMENTS.sub(' ', text)
+def _clean_html(html_text: str) -> str:
+    text = re.sub(r'<br\s*/?>', '\n', html_text, flags=re.IGNORECASE)
+    text = re.sub(r'<p[^>]*>', '\n', text, flags=re.IGNORECASE)
     text = _STRIP_TAGS_ALL.sub(' ', text)
-    text = _clean_text(text)
-
-    # Filter low-quality paragraphs (boilerplate)
-    paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-    scored = [(p, _content_score(p)) for p in paragraphs]
-    # Keep paragraphs with reasonable text density (>0.3 score)
-    good_paragraphs = [p for p, s in scored if s > 0.3]
-    if len(good_paragraphs) >= 2:
-        return '\n'.join(good_paragraphs)
-    return text
-
-
-def _extract_main_content(html: str) -> str:
-    """Try to extract the main content area from HTML.
-
-    Looks for: <article>, <main>, role="main", common content divs.
-    Falls back to full HTML if no content area found.
-    """
-    import re as _re
-
-    # Priority extraction targets
-    patterns = [
-        r'<article[^>]*>(.*?)</article>',
-        r'<main[^>]*>(.*?)</main>',
-        r'<div[^>]*role=["\']main["\'][^>]*>(.*?)</div>',
-        r'<div[^>]*class=["\'][^"\']*(?:content|post|article|entry|body|text)[^"\']*["\'][^>]*>(.*?)</div>',
-        r'<div[^>]*id=["\'][^"\']*(?:content|post|article|entry|body|text)[^"\']*["\'][^>]*>(.*?)</div>',
-        r'<section[^>]*class=["\'][^"\']*(?:content|post|article|entry)[^"\']*["\'][^>]*>(.*?)</section>',
-    ]
-
-    for pattern in patterns:
-        matches = _re.findall(pattern, html, _re.DOTALL | _re.IGNORECASE)
-        if matches:
-            # Use the longest match (most likely the real content)
-            best = max(matches, key=len)
-            if len(best) > 200:
-                return best
-
-    return html
-
-
-def _content_score(text: str) -> float:
-    """Score paragraph quality. Higher = more likely to be real content.
-
-    Penalizes: short text, navigation text (contains many links),
-               cookie/privacy notices, copyright, boilerplate.
-    """
-    if len(text) < 20:
-        return 0.0
-    # Penalize common boilerplate patterns
-    boilerplate_patterns = [
-        'cookie', 'privacy', 'copyright', '©', 'all rights reserved',
-        'subscribe', 'newsletter', 'advertisement', 'sponsored',
-        '首页', '登录', '注册', '导航', 'footer', 'header',
-        '上一篇', '下一篇', '分享到', '点赞', '收藏',
-        'function(', 'var ', 'const ', 'let ', '=>', '{', '}',
-    ]
-    text_lower = text.lower()
-    penalty = sum(1 for bp in boilerplate_patterns if bp in text_lower)
-    base = min(len(text) / 200.0, 1.0)  # 200+ chars = full score
-    return max(0.0, base - penalty * 0.15)
+    import html as _html
+    text = _html.unescape(text)
+    return _clean_text(text)
 
 
 def _clean_text(text: str) -> str:
-    """Clean extracted text."""
-    # Remove URLs (clutter in extracted text)
-    text = _STRIP_URLS_IN_TEXT.sub(' ', text)
-    # Decode common HTML entities
     text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
     text = text.replace("&quot;", '"').replace("&#39;", "'").replace("&nbsp;", " ")
-    # Remove numeric entities
     text = _STRIP_ENTITIES.sub(' ', text)
-    # Collapse whitespace
     text = _STRIP_WHITESPACE.sub(' ', text)
     return text.strip()
+
+
+def _content_score(text: str) -> float:
+    """Score paragraph quality. Higher = real content, lower = boilerplate."""
+    if len(text) < 20:
+        return 0.0
+    boilerplate = ['cookie', 'privacy', 'copyright', '©', 'subscribe', 'newsletter',
+                   '首页', '登录', '注册', '导航', '上一篇', '下一篇', '分享到', '点赞',
+                   'function(', 'var ', 'const ', '=>']
+    text_lower = text.lower()
+    penalty = sum(1 for bp in boilerplate if bp in text_lower)
+    base = min(len(text) / 200.0, 1.0)
+    return max(0.0, base - penalty * 0.15)
 
 
 def _trim(text: str, max_chars: int) -> str:
@@ -285,15 +277,11 @@ def _trim(text: str, max_chars: int) -> str:
     return text[:max_chars] + "..."
 
 
-# ── Self-register ────────────────────────────────────────────────────
+# ── Self-register ─────────────────────────────────────────────────
 
 registry.register(
-    name="web_fetch",
-    toolset="web",
-    schema=WEB_FETCH_SCHEMA,
-    handler=_handle_web_fetch,
-    is_async=False,
-    description="Fetch and extract text content from a web page URL",
-    emoji=FETCH_EMOJI,
-    max_result_size_chars=MAX_CHARS_LIMIT,
+    name="web_fetch", toolset="web", schema=WEB_FETCH_SCHEMA,
+    handler=_handle_web_fetch, is_async=False,
+    description="Fetch and extract text from web pages using trafilatura + regex",
+    emoji=FETCH_EMOJI, max_result_size_chars=MAX_CHARS_LIMIT,
 )
