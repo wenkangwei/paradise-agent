@@ -57,28 +57,28 @@ def _resolve_backend() -> str:
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
     "description": (
-        "Search the web for information. Returns up to 5 results by default "
-        "with title, URL, and description for each result. "
-        "Use this when you need to find current information, facts, or "
-        "documentation that is not in your training data.\n\n"
-        "Supported search operators (may work depending on backend):\n"
-        "  site:example.com  — limit to a specific site\n"
-        "  \"exact phrase\"   — search for exact phrase\n"
-        "  -exclude          — exclude results with this term"
+        "Search the web for information. Returns results with title, URL, and "
+        "description. Use the 'sites' parameter to search specific websites.\n\n"
+        "Available search sources: Bing (default), Brave Search, SearXNG.\n"
+        "Knowledge sites auto-targeted for lifestyle queries: Xiaohongshu, Zhihu, WeChat.\n\n"
+        "Operators: site:domain, \"exact phrase\", -exclude"
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "The search query. Supports operators like site:, \"phrase\", -term.",
+                "description": "The search query. Supports operators: site:, \"phrase\", -term.",
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of results (default 5, max 20)",
-                "minimum": 1,
-                "maximum": 20,
-                "default": 5,
+                "description": "Maximum results (default 15, max 20)",
+                "minimum": 1, "maximum": 20, "default": 15,
+            },
+            "sites": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional: specific websites to search, e.g. [\"zhihu.com\", \"xiaohongshu.com\"]. If provided, queries are scoped to these sites.",
             },
         },
         "required": ["query"],
@@ -92,10 +92,18 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
     """Execute a web search with RAG pipeline: search → fetch → summarize → format."""
     query = args.get("query", "")
     context = args.get("_context", "")  # from agent: time, user profile, history context
+    sites = args.get("sites", []) or []
     limit = min(max(int(args.get("limit", MAX_RESULTS_DEFAULT) or MAX_RESULTS_DEFAULT), 1), 20)
 
     if not query.strip():
         return tool_error("search query is empty")
+
+    # Build site-scoped query if sites are specified
+    if sites and isinstance(sites, list) and len(sites) > 0:
+        site_filter = " OR ".join(s.strip() for s in sites if s.strip())
+        if site_filter:
+            query = f"({query}) site:({site_filter})"
+            logger.info("web_search: site-scoped query → %s", query[:100])
 
     backend = _resolve_backend()
     logger.info("web_search: '%s' (limit=%d, backend=%s)", query, limit, backend)
@@ -678,7 +686,9 @@ async def _call_summarizer_llm(system: str, user: str, title: str) -> str | None
 
 def _fallback_summary(content: str, title: str) -> str:
     """Fallback: return first 300 chars as summary."""
-    cleaned = _clean_text(content)
+    # Simple cleanup: strip HTML tags, collapse whitespace
+    cleaned = re.sub(r'<[^>]+>', '', content)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     if len(cleaned) <= 300:
         return cleaned
     return cleaned[:300] + "..."
