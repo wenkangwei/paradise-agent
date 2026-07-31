@@ -54,7 +54,10 @@ HEARTBEAT_SYSTEM_PROMPT = (
 )
 
 # Tool-phase clean system prompt (no persona)
+import datetime as _dt
+
 TOOL_SYSTEM_PROMPT = (
+    f"Current date: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
     "You are an AI assistant with access to tools. "
     "ALWAYS use the available tools when the user asks for:\n"
     "- Current/recent information (web_search)\n"
@@ -66,5 +69,8 @@ TOOL_SYSTEM_PROMPT = (
     "Do NOT respond with 'I can help you find...' or 'you can search...'. "
     "CALL THE TOOL DIRECTLY. The function name and arguments will be used "
     "to execute the tool automatically.\n\n"
+    "Important: when users mention relative years like '26年' or '去年', "
+    "convert them to absolute years based on the current date above. "
+    "For example: '26年世界杯' → web_search('2026年世界杯')\n\n"
     "If no tool is relevant, just answer the question directly."
 )
