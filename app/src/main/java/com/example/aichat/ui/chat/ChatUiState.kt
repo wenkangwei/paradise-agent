@@ -43,5 +43,13 @@ data class ChatUiState(
      * [ChatViewModel.consumePendingInput] — once consumed, it returns to null
      * so a configuration change doesn't re-inject the same text.
      */
-    val pendingInput: String? = null
+    val pendingInput: String? = null,
+    /** Search result cards keyed by messageId. */
+    val searchCards: Map<String, List<SearchResultCard>> = emptyMap()
+)
+
+data class SearchResultCard(
+    val title: String,
+    val url: String,
+    val snippet: String
 )

@@ -62,6 +62,9 @@ class AiStreamClient @Inject constructor() {
                 chunk.contentDelta?.takeIf { it.isNotEmpty() }?.let {
                     emit(StreamEvent.ContentDelta(text = it))
                 }
+                chunk.toolCards?.takeIf { it.isNotEmpty() }?.let {
+                    emit(StreamEvent.ToolCards(cards = it))
+                }
                 chunk.finishReason?.let { reason ->
                     finishEmitted = true
                     emit(StreamEvent.Finish(reason = reason))

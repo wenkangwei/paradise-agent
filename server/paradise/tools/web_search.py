@@ -84,6 +84,7 @@ WEB_SEARCH_SCHEMA = {
 async def _handle_web_search(args: dict[str, Any]) -> str:
     """Execute a web search with RAG pipeline: search → fetch → summarize → format."""
     query = args.get("query", "")
+    context = args.get("_context", "")  # from agent: time, user profile, history context
     limit = min(max(int(args.get("limit", MAX_RESULTS_DEFAULT) or MAX_RESULTS_DEFAULT), 1), 20)
 
     if not query.strip():
@@ -95,7 +96,7 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
     try:
         # ── Query rewriting ─────────────────────────────────────
         search_queries = [query]
-        rewritten = await _rewrite_query(query)
+        rewritten = await _rewrite_query(query, context)
         if rewritten:
             for rq in rewritten:
                 if rq and rq != query:
@@ -384,9 +385,10 @@ def _clean_html(text: str) -> str:
 
 # ── Query Rewriting ─────────────────────────────────────────────
 
-async def _rewrite_query(query: str) -> list[str]:
+async def _rewrite_query(query: str, context: str = "") -> list[str]:
     """Ask a fast LLM to rewrite/expand the search query for better results.
 
+    Uses available context (time, user profile, history) to optimize queries.
     Returns up to 2 rewritten variations (not including the original).
     """
     if os.getenv("WEB_SEARCH_REWRITE", "1") in ("0", "false", "no"):
@@ -395,11 +397,20 @@ async def _rewrite_query(query: str) -> list[str]:
     ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     model = os.getenv("QUERY_REWRITE_MODEL", "qwen2.5:3b")
 
+    context_block = ""
+    if context:
+        context_block = f"\nContext:\n{context}\n"
+
     prompt = (
-        "Rewrite the following search query into 1-2 alternative phrasings "
-        "that would get better search results. Output each on a new line. "
-        "Keep them concise and relevant. Do NOT add numbering or prefixes.\n\n"
-        f"Query: {query}\n\nRewritten:"
+        "You are a search query optimizer. Given a user's question, rewrite it "
+        "into 1-2 alternative search queries that will find better results. "
+        "Consider: the current time (for freshness), user location (for local results), "
+        "user profile (for personalization), and conversation context.\n"
+        f"{context_block}"
+        f"User query: {query}\n\n"
+        "Output each rewritten query on a separate line. No numbering, no prefixes. "
+        "Make queries concise and search-engine friendly (keywords work better than "
+        "full sentences). Output ONLY the queries, nothing else."
     )
 
     try:

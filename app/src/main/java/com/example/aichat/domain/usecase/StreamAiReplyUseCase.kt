@@ -118,6 +118,7 @@ class StreamAiReplyUseCase @Inject constructor(
 
             val contentBuilder = StringBuilder()
             val reasoningBuilder = StringBuilder()
+            val searchResults = mutableListOf<com.example.aichat.domain.model.MessageMetadata.SearchResult>()
             var finishedNormally: Boolean? = null
             var lastSaveMs = System.currentTimeMillis()
             // Populated when the SSE request itself fails (HTTP 4xx/5xx, network
@@ -151,6 +152,14 @@ class StreamAiReplyUseCase @Inject constructor(
                             finishedNormally = true
                         }
                         is StreamEvent.ToolCall -> { /* reserved */ }
+                        is StreamEvent.ToolCards -> {
+                            searchResults.addAll(event.cards.flatMap { card ->
+                                card.results?.map { r ->
+                                    com.example.aichat.domain.model.MessageMetadata.SearchResult(
+                                        title = r.title, snippet = r.snippet, url = r.url)
+                                } ?: emptyList()
+                            })
+                        }
                         is StreamEvent.Cancelled -> {
                             finishedNormally = false
                         }
@@ -251,12 +260,14 @@ class StreamAiReplyUseCase @Inject constructor(
                         reasoningContent = finalReasoning,
                         status = status.name
                     )
-                    if (interruptedReason != null) {
+                    // Persist metadata (search results and/or error info)
+                    if (interruptedReason != null || searchResults.isNotEmpty()) {
                         repository.updateMessageMetadata(
                             aiMessageId,
                             MessageMetadata(
                                 interruptedReason = interruptedReason,
-                                errorCategory = honorTaggedCategory
+                                errorCategory = honorTaggedCategory,
+                                searchResults = searchResults
                             )
                         )
                     }
