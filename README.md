@@ -4,7 +4,7 @@
 
 ## 功能展示
 
-| 对话 & 思考 | 网页搜索 | 语音转文字 | 设置页 |
+| 截图1 | 截图2 | 截图3 | 截图4 |
 |:---:|:---:|:---:|:---:|
 | ![chat](docs/images/screenshot-chat.jpg) | ![search](docs/images/screenshot-search.jpg) | ![voice](docs/images/screenshot-voice.jpg) | ![settings](docs/images/screenshot-settings.jpg) |
 
