@@ -94,12 +94,14 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
     logger.info("web_search: '%s' (limit=%d, backend=%s)", query, limit, backend)
 
     try:
-        # ── Query rewriting ─────────────────────────────────────
+        # ── Query rewriting (conservative) ───────────────────────
         search_queries = [query]
         rewritten = await _rewrite_query(query, context)
         if rewritten:
             for rq in rewritten:
-                if rq and rq != query:
+                rq = rq.strip()
+                # Only add if different from original AND maintains core topic
+                if rq and rq != query and _similar_enough(query, rq):
                     search_queries.append(rq)
         logger.info("web_search queries: %s", search_queries)
 
@@ -446,15 +448,16 @@ async def _rewrite_query(query: str, context: str = "") -> list[str]:
         context_block = f"\nContext:\n{context}\n"
 
     prompt = (
-        "You are a search query optimizer. Given a user's question, rewrite it "
-        "into 1-2 alternative search queries that will find better results. "
-        "Consider: the current time (for freshness), user location (for local results), "
-        "user profile (for personalization), and conversation context.\n"
+        "You are a search keyword optimizer. Given a user query, suggest 1-2 "
+        "ALTERNATIVE search keyword combinations that might find better results.\n"
+        "CRITICAL RULES:\n"
+        "- NEVER change time references (e.g., '26年' stays '2026年' or '26年', don't invent different years)\n"
+        "- NEVER change the core topic (e.g., '世界杯' stays '世界杯')\n"
+        "- Only ADD related keywords or rephrase for search engines\n"
+        "- Keep original meaning exactly, just optimize for search\n"
         f"{context_block}"
-        f"User query: {query}\n\n"
-        "Output each rewritten query on a separate line. No numbering, no prefixes. "
-        "Make queries concise and search-engine friendly (keywords work better than "
-        "full sentences). Output ONLY the queries, nothing else."
+        f"Original query: {query}\n\n"
+        "Output ONLY the rewritten queries, one per line. No numbering, no explanation."
     )
 
     try:
@@ -480,6 +483,31 @@ async def _rewrite_query(query: str, context: str = "") -> list[str]:
     except Exception as e:
         logger.debug("Query rewrite failed: %s", e)
         return []
+
+
+def _similar_enough(original: str, rewritten: str) -> bool:
+    """Check if rewritten query maintains core topic similarity.
+
+    Returns False if the rewrite changes the meaning too much
+    (e.g., different years, different topics).
+    """
+    # Extract numeric years from both
+    import re as _re
+    orig_years = set(_re.findall(r'\d{2,4}年?', original))
+    new_years = set(_re.findall(r'\d{2,4}年?', rewritten))
+
+    # If original has years but rewritten has different years → reject
+    if orig_years and new_years and not (orig_years & new_years):
+        return False
+
+    # Simple word overlap check
+    orig_words = set(original)
+    new_words = set(rewritten)
+    overlap = len(orig_words & new_words) / max(len(orig_words), 1)
+    if overlap < 0.2:
+        return False
+
+    return True
 
 
 # ── Re-ranking ──────────────────────────────────────────────────
