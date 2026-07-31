@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 BING_SEARCH_URL = "https://cn.bing.com/search"
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 TIMEOUT = 15.0
+
+# Knowledge base sites — when user asks about lifestyle/food/travel/etc.,
+# these sites are searched for high-quality Chinese content.
+_KNOWLEDGE_SITES = os.getenv("SEARCH_KNOWLEDGE_SITES", "").strip()
+if not _KNOWLEDGE_SITES:
+    _KNOWLEDGE_SITES = "xiaohongshu.com OR zhihu.com OR weixin.qq.com"
 MAX_RESULTS_DEFAULT = int(os.getenv("WEB_SEARCH_DEFAULT_LIMIT", "15"))
 FETCH_COUNT_DEFAULT = int(os.getenv("WEB_SEARCH_FETCH_COUNT", "5"))
 SEARCH_EMOJI = "\U0001f50d"
@@ -101,10 +107,17 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
         if rewritten:
             for rq in rewritten:
                 rq = rq.strip()
-                # Only add if different from original AND maintains core topic
                 if rq and rq != query and _similar_enough(query, rq):
                     search_queries.append(rq)
-        logger.info("web_search queries: %s", search_queries)
+
+        # ── Knowledge base site targeting ────────────────────────
+        # Add site-scoped queries for lifestyle/how-to queries
+        if _should_search_knowledge_sites(query):
+            kq = f"({query}) site:({_KNOWLEDGE_SITES})"
+            search_queries.append(kq)
+            logger.info("web_search: added knowledge site query")
+
+        logger.info("web_search queries: %s", search_queries[:4])
 
         # ── Multi-source search ─────────────────────────────────
         # Run all available backends in parallel
@@ -471,6 +484,21 @@ async def _rewrite_query(query: str, context: str = "") -> list[str]:
     except Exception as e:
         logger.debug("Query rewrite failed: %s", e)
         return []
+
+
+def _should_search_knowledge_sites(query: str) -> bool:
+    """Check if query would benefit from content platform search.
+
+    Lifestyle/food/travel/how-to queries → add Xiaohongshu/Zhihu/WeChat sites.
+    """
+    kb_keywords = [
+        "攻略", "推荐", "怎么做", "如何", "方法", "教程", "经验",
+        "探店", "美食", "旅游", "穿搭", "护肤", "美妆", "健身",
+        "餐厅", "酒店", "景点", "打卡", "好物", "测评", "分享",
+        "recipe", "tutorial", "guide", "review", "tips", "how to",
+    ]
+    query_lower = query.lower()
+    return any(kw in query_lower for kw in kb_keywords)
 
 
 def _similar_enough(original: str, rewritten: str) -> bool:
