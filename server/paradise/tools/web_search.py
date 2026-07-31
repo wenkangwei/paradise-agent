@@ -432,10 +432,10 @@ def _clean_html(text: str) -> str:
 # ── Query Rewriting ─────────────────────────────────────────────
 
 async def _rewrite_query(query: str, context: str = "") -> list[str]:
-    """Ask a fast LLM to rewrite/expand the search query for better results.
+    """Ask a fast LLM to suggest alternative search keywords.
 
-    Uses available context (time, user profile, history) to optimize queries.
-    Returns up to 2 rewritten variations (not including the original).
+    Returns up to 2 variations. Context is deliberately NOT passed to the
+    LLM prompt — small models hallucinate when given too much context.
     """
     if os.getenv("WEB_SEARCH_REWRITE", "1") in ("0", "false", "no"):
         return []
@@ -443,21 +443,12 @@ async def _rewrite_query(query: str, context: str = "") -> list[str]:
     ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     model = os.getenv("QUERY_REWRITE_MODEL", "qwen2.5:3b")
 
-    context_block = ""
-    if context:
-        context_block = f"\nContext:\n{context}\n"
-
     prompt = (
-        "You are a search keyword optimizer. Given a user query, suggest 1-2 "
-        "ALTERNATIVE search keyword combinations that might find better results.\n"
-        "CRITICAL RULES:\n"
-        "- NEVER change time references (e.g., '26年' stays '2026年' or '26年', don't invent different years)\n"
-        "- NEVER change the core topic (e.g., '世界杯' stays '世界杯')\n"
-        "- Only ADD related keywords or rephrase for search engines\n"
-        "- Keep original meaning exactly, just optimize for search\n"
-        f"{context_block}"
-        f"Original query: {query}\n\n"
-        "Output ONLY the rewritten queries, one per line. No numbering, no explanation."
+        "Given this search query, write 1-2 alternative keyword combinations "
+        "that mean EXACTLY the same thing. Do NOT change the meaning, topic, "
+        "or time period. Just rephrase for better search results.\n\n"
+        f"Query: {query}\n\n"
+        "Rewritten (one per line, no numbering):"
     )
 
     try:

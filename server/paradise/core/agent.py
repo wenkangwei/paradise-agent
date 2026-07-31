@@ -252,22 +252,6 @@ class ParadiseAgent:
                         name = tc.name
                         args = json.loads(tc.arguments) if isinstance(tc.arguments, str) else tc.arguments
 
-                    # Inject context for web_search query rewriting
-                    if name == "web_search":
-                        from datetime import datetime as _dt
-                        ctx_parts = [f"Time: {_dt.now().strftime('%Y-%m-%d %H:%M')}"]
-                        user_profile = getattr(ctx, '_user_profile', '') or ''
-                        if user_profile:
-                            ctx_parts.append(f"User: {user_profile}")
-                        # Last 3 messages as context
-                        raw_msgs = getattr(ctx, '_raw_messages', None)
-                        if raw_msgs and isinstance(raw_msgs, list):
-                            recent = raw_msgs[-4:]  # last 2 turns
-                            ctx_parts.append("Recent: " + " | ".join(
-                                f"{m.get('role','')}: {str(m.get('content',''))[:80]}"
-                                for m in recent))
-                        args["_context"] = "\n".join(ctx_parts)
-
                     tool_result = await execute_tool(name, args)
                     elapsed = (_time.time() - t0) * 1000
 
