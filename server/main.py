@@ -6,9 +6,12 @@ Two chat endpoints:
 """
 
 import logging
+import os
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
 from api.routes import openai_proxy
@@ -147,3 +150,30 @@ async def health():
         "version": "1.1.0",
         "agent_enabled": AGENT_ENABLED,
     }
+
+
+@app.post("/api/stt/transcribe")
+async def stt_transcribe(file: UploadFile = File(...), language: str = "zh"):
+    """Transcribe uploaded audio file using Whisper.
+
+    Accepts multipart file upload, returns {"text": "...", "language": "..."}
+    """
+    import tempfile
+    suffix = Path(file.filename or "audio.m4a").suffix or ".m4a"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+
+    try:
+        from paradise.tools.voice_transcribe import _handle_voice_transcribe
+        import json
+        result = _handle_voice_transcribe({"path": tmp_path, "language": language})
+        data = json.loads(result) if isinstance(result, str) else result
+        if "error" in data:
+            return JSONResponse(status_code=500, content=data)
+        return data
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass

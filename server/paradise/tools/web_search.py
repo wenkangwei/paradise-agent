@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 BING_SEARCH_URL = "https://www.bing.com/search"
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 TIMEOUT = 15.0
-MAX_RESULTS_DEFAULT = 5
+MAX_RESULTS_DEFAULT = int(os.getenv("WEB_SEARCH_DEFAULT_LIMIT", "10"))
 SEARCH_EMOJI = "\U0001f50d"
 
 

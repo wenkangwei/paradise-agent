@@ -472,11 +472,9 @@ async def process_message_stream(
                         result=event.get("result", ""),
                         duration_ms=event.get("duration_ms", 0),
                     )
-                # Brief indicator — results go into agent context only
                 tool_name = event.get("name", "tool")
                 tool_emoji = _tool_emoji(tool_name)
                 tool_duration = event.get("duration_ms", 0)
-                # Emit reasoning delta so Android shows it in thinking section
                 tool_info = f"{tool_emoji} {tool_name} ({(tool_duration/1000):.1f}s)"
                 yield _sse_chunk({
                     "choices": [{
@@ -485,6 +483,23 @@ async def process_message_stream(
                         "finish_reason": None,
                     }],
                 })
+                # web_search: emit results as structured ToolCard for Android UI
+                if tool_name == "web_search":
+                    cards = _parse_search_result_cards(event.get("result", ""))
+                    if cards:
+                        yield _sse_chunk({
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "tool_cards": [{
+                                        "type": "search_results",
+                                        "title": f"Search: {event.get('arguments', {}).get('query', '')}",
+                                        "results": cards,
+                                    }]
+                                },
+                                "finish_reason": None,
+                            }],
+                        })
 
             elif evt_type == "error":
                 if recorder:
@@ -597,6 +612,40 @@ def _tool_emoji(name: str) -> str:
         "search_files": "\U0001f50e",
         "context_expand": "\U0001f4c2",
     }.get(name, "\U0001f527")
+
+
+def _parse_search_result_cards(result_text: str) -> list[dict]:
+    """Parse web_search result text into structured card entries.
+
+    Expected format (from web_search._format_results):
+      ### 1. Title
+      URL: https://...
+      - bullet 1
+      - bullet 2
+
+    Returns list of {title, url, snippet} dicts.
+    """
+    import re
+    cards = []
+    # Split by "### N. Title" or "**Title**"
+    entries = re.split(r'\n(?=(?:### \d+\.|Page:|\*\*))', result_text)
+    for entry in entries:
+        entry = entry.strip()
+        if not entry or entry.startswith("Web search results") or entry.startswith("搜索结果"):
+            continue
+        # Extract title
+        title_match = re.search(r'(?:### \d+\.\s*|Page:\s*|\*\*)(.+?)(?:\*\*|\n|$)', entry)
+        title = title_match.group(1).strip() if title_match else ""
+        # Extract URL
+        url_match = re.search(r'URL:\s*(\S+)', entry)
+        url = url_match.group(1) if url_match else ""
+        # Extract snippet (first 120 chars after URL, skip bullets)
+        rest = entry[url_match.end():].strip() if url_match else entry
+        snippet = re.sub(r'^-\s+', '', rest.split('\n')[0] if rest else '')[:120]
+        if title:
+            cards.append({"title": title, "url": url, "snippet": snippet})
+
+    return cards[:10]  # Max 10 cards
 
 
 # ── Warmup ─────────────────────────────────────────────────────────

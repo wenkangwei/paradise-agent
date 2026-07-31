@@ -1,5 +1,7 @@
 package com.example.aichat.data.voice
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -31,32 +33,34 @@ interface TtsProvider {
 class AndroidTtsProvider(
     private val context: android.content.Context
 ) : TtsProvider {
-    override suspend fun synthesize(text: String, voice: String, model: String): ByteArray {
-        // Android built-in TTS writes to a file, then read back as bytes
+    override suspend fun synthesize(text: String, voice: String, model: String): ByteArray = withContext(Dispatchers.IO) {
         val file = java.io.File(context.cacheDir, "tts_android_${System.currentTimeMillis()}.wav")
-        val lock = java.util.concurrent.CountDownLatch(1)
-        var success = false
+        val initLock = java.util.concurrent.CountDownLatch(1)
+        var initOk = false
+
         val tts = android.speech.tts.TextToSpeech(context) { status ->
-            // init callback — status == TextToSpeech.SUCCESS means engine ready
+            initOk = (status == android.speech.tts.TextToSpeech.SUCCESS)
+            initLock.countDown()
         }
+        // Wait up to 5s for TTS engine init
+        initLock.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        if (!initOk) {
+            tts.shutdown()
+            return@withContext ByteArray(0)
+        }
+
         tts.language = java.util.Locale.CHINESE
         tts.setSpeechRate(1.0f)
-        tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) { lock.countDown() }
-            override fun onError(utteranceId: String?) { lock.countDown() }
-            @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?, errorCode: Int) { lock.countDown() }
-        })
-        val result = tts.synthesizeToFile(text, null, file, "tts_1")
-        if (result == android.speech.tts.TextToSpeech.SUCCESS) {
-            lock.await(30, java.util.concurrent.TimeUnit.SECONDS)
-            if (file.exists() && file.length() > 0) {
-                success = true
-            }
-        }
+
+        // synthesizeToFile blocks until audio is written (API 21+)
+        val result = tts.synthesizeToFile(text, null, file, null)
         tts.shutdown()
-        return if (success) file.readBytes() else ByteArray(0)
+
+        if (result == android.speech.tts.TextToSpeech.SUCCESS && file.exists() && file.length() > 0) {
+            file.readBytes()
+        } else {
+            ByteArray(0)
+        }
     }
 }
 

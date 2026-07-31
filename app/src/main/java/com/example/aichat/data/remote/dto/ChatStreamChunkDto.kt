@@ -38,6 +38,10 @@ data class ChatStreamChunkDto(
     /** First-choice finish_reason; non-null on the terminal chunk. */
     val finishReason: String?
         get() = choices.firstOrNull()?.finishReason
+
+    /** Tool cards (search results, etc.) from agent tool calls. */
+    val toolCards: List<ToolCardDto>?
+        get() = choices.firstOrNull()?.delta?.toolCards
 }
 
 data class ChoiceDto(
@@ -49,5 +53,18 @@ data class ChoiceDto(
 data class DeltaDto(
     @SerializedName("role") val role: String? = null,
     @SerializedName("content") val content: String? = null,
-    @SerializedName("reasoning_content") val reasoningContent: String? = null
+    @SerializedName("reasoning_content") val reasoningContent: String? = null,
+    @SerializedName("tool_cards") val toolCards: List<ToolCardDto>? = null
+)
+
+data class ToolCardDto(
+    @SerializedName("type") val type: String = "",
+    @SerializedName("title") val title: String = "",
+    @SerializedName("results") val results: List<SearchResultDto>? = null
+)
+
+data class SearchResultDto(
+    @SerializedName("title") val title: String = "",
+    @SerializedName("url") val url: String = "",
+    @SerializedName("snippet") val snippet: String = ""
 )

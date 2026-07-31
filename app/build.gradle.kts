@@ -82,6 +82,9 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
 
+    // Vosk — offline speech recognition
+    implementation("com.alphacephei:vosk-android:0.3.47")
+
     // ML Kit — on-device OCR
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
