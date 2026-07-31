@@ -1,6 +1,8 @@
 package com.example.aichat.ui.chat
 
+import android.content.Intent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,19 +24,27 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
@@ -108,6 +118,14 @@ private fun ImageGrid(images: List<Attachment>) {
 @Composable
 private fun FileAttachmentCard(attachment: Attachment) {
     val appearance = fileAppearance(attachment)
+    val isAudio = attachment.mimeType.startsWith("audio/") ||
+        attachment.extension() in setOf("mp3", "flac", "wav", "aac", "ogg", "m4a")
+
+    // Inline audio player state
+    var audioPlaying by remember { mutableStateOf(false) }
+    val mediaPlayer = remember { mutableStateOf<android.media.MediaPlayer?>(null) }
+    DisposableEffect(Unit) { onDispose { runCatching { mediaPlayer.value?.release() } } }
+
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -147,6 +165,37 @@ private fun FileAttachmentCard(attachment: Attachment) {
                     text = appearance.label,
                     style = MaterialTheme.typography.labelSmall,
                     color = appearance.tintColor
+                )
+            }
+            if (isAudio) {
+                Spacer(Modifier.width(8.dp))
+                Icon(
+                    imageVector = if (audioPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (audioPlaying) "暂停" else "播放",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clickable {
+                            val mp = mediaPlayer.value
+                            if (mp != null && mp.isPlaying) {
+                                mp.pause()
+                                audioPlaying = false
+                            } else if (mp != null) {
+                                mp.start()
+                                audioPlaying = true
+                            } else {
+                                runCatching {
+                                    val newMp = android.media.MediaPlayer().apply {
+                                        setDataSource(attachment.uri)
+                                        setOnCompletionListener { audioPlaying = false }
+                                        prepare()
+                                        start()
+                                    }
+                                    mediaPlayer.value = newMp
+                                    audioPlaying = true
+                                }
+                            }
+                        }
                 )
             }
         }

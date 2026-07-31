@@ -485,6 +485,11 @@ fun ChatScreen(
                     onRemoveAttachment = { id ->
                         viewModel.removePendingAttachment(id)
                     },
+                    serverBaseUrl = uiState.activeProfile?.baseUrl.orEmpty()
+                        .let { runCatching {
+                            val u = java.net.URL(it)
+                            "${u.protocol}://${u.host}${if (u.port > 0) ":${u.port}" else ""}"
+                        }.getOrDefault("") },
                     pendingInput = uiState.pendingInput,
                     onPendingInputConsumed = { viewModel.consumePendingInput() },
                     modifier = Modifier

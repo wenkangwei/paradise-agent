@@ -1,9 +1,24 @@
 package com.example.aichat.ui.chat
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
+import java.io.File
+import java.util.concurrent.TimeUnit
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -101,6 +116,7 @@ fun ChatInputBar(
     pendingAttachments: List<Attachment> = emptyList(),
     onAddAttachment: (String, String) -> Unit,
     onRemoveAttachment: (String) -> Unit,
+    serverBaseUrl: String = "",
     /**
      * One-shot external prefill. When it goes non-null the bar replaces its
      * current text with this value, brings up the IME, and immediately calls
@@ -183,19 +199,28 @@ fun ChatInputBar(
         ActivityResultContracts.RequestPermission()
     ) { granted -> hasMicPermission = granted }
 
-    // v4.2.12 #3a-redesign: voice session result → SEND IMMEDIATELY (Kimi
-    // style). Earlier "append to input box" was tested and rejected by the
-    // user; in voice mode the user's intent is "speak → send", not "speak →
-    // edit → send". If transcription is empty (Honor ASR often returns ""
-    // for short utterances) we no-op so the user can retry.
-    val voice = rememberVoiceRecognizer(onResult = { recognized ->
-        val clean = recognized.trim()
-        if (clean.isNotEmpty() || pendingAttachments.isNotEmpty()) {
-            onSend(clean, pendingAttachments)
-            text = ""
-            keyboard?.hide()
+    // Voice: record WAV → upload to server Whisper → send text
+    // Vosk code preserved in VoiceInput as fallback
+    val scope = rememberCoroutineScope()
+    val voiceRecorder = rememberVoiceRecorder(context = context,
+        onResult = { result ->
+            scope.launch {
+                // Try server Whisper first, fallback to Vosk
+                val transcribed = withContext(Dispatchers.IO) {
+                    val whisperText = uploadForStt(result.wavFile, serverBaseUrl)
+                    if (whisperText.isNotEmpty()) whisperText
+                    else if (result.transcript.isNotEmpty()) result.transcript
+                    else ""
+                }
+                if (transcribed.isNotEmpty()) {
+                    onSend(transcribed, pendingAttachments)
+                    text = ""
+                    keyboard?.hide()
+                }
+                inputMode = InputMode.TEXT
+            }
         }
-    })
+    )
 
     // ── Pill container ─────────────────────────────────────────────────────
     Surface(
@@ -301,7 +326,7 @@ fun ChatInputBar(
                             // behavior. Tapping Mic flips the whole row into
                             // VOICE mode (HoldToSpeakButton); long-press-to-
                             // record happens there, not here.
-                            text.isBlank() && pendingAttachments.isEmpty() && voice.isAvailable -> {
+                            text.isBlank() && pendingAttachments.isEmpty() && voiceRecorder.isAvailable -> {
                                 Icon(
                                     imageVector = Icons.Filled.Mic,
                                     contentDescription = "切换到语音模式",
@@ -369,8 +394,8 @@ fun ChatInputBar(
                 HoldToSpeakButton(
                     isLoading = isLoading,
                     enabled = !isLoading,
-                    onPressStart = { voice.start() },
-                    onPressEnd = { voice.stop() },
+                    onPressStart = { voiceRecorder.start() },
+                    onPressEnd = { voiceRecorder.stop() },
                     onAddAttachment = { showSheet = true },
                     onSwitchToText = { inputMode = InputMode.TEXT },
                     onStop = onStop,
@@ -771,3 +796,30 @@ private fun WaveformBars(
  * and clicking the keyboard icon in voice mode swaps back.
  */
 private enum class InputMode { TEXT, VOICE }
+
+private val sttClient by lazy {
+    OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
+}
+
+/** Upload WAV to server Whisper, return transcribed text (or empty on failure). */
+private suspend fun uploadForStt(wavFile: File, serverBaseUrl: String): String =
+    withContext(Dispatchers.IO) {
+        if (serverBaseUrl.isBlank()) return@withContext ""
+        try {
+            val reqBody = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file", wavFile.name,
+                    wavFile.asRequestBody("audio/wav".toMediaType()))
+                .addFormDataPart("language", "zh")
+                .build()
+            val resp = sttClient.newCall(Request.Builder()
+                .url("${serverBaseUrl}/api/stt/transcribe")
+                .post(reqBody).build()).execute()
+            val json = resp.body?.string() ?: ""
+            org.json.JSONObject(json).optString("text", "")
+        } catch (e: Exception) { "" }
+    }
+
