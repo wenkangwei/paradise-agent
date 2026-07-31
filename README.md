@@ -1,126 +1,184 @@
-# AiChat Android
+# Paradise Agent — 本地 AI 聊天 Agent 框架
 
-OpenAI 兼容的 AI 聊天 Android 客户端，支持自定义 API 后端（Ollama / z.ai / OpenAI / PC agent 桥接），含 Python agent 框架服务端（paradise）。
+端到端本地 AI Agent 系统：Android 客户端 + Python agent 服务端。支持 ReAct 推理循环、工具调用、网页搜索、语音转文字、TTS 朗读、图片理解、物体检测。
+
+## 功能展示
+
+| 对话 & 思考 | 网页搜索 | 语音转文字 | 设置页 |
+|:---:|:---:|:---:|:---:|
+| ![chat](docs/images/screenshot-chat.jpg) | ![search](docs/images/screenshot-search.jpg) | ![voice](docs/images/screenshot-voice.jpg) | ![settings](docs/images/screenshot-settings.jpg) |
+
+**核心能力**：
+- ReAct Agent 推理循环（工具调用 → 思考 → 回复）
+- 网页搜索 + Query 改写 + RAG 摘要 + 搜索结果卡片
+- 语音转文字（服务端 Whisper + 离线 Vosk 兜底）
+- TTS 语音朗读（Android 内置引擎）
+- 图片理解（vision_analyze → qwen2.5vl）
+- 物体检测（YOLOv8-nano）
+- OCR 文字识别（ML Kit 离线）
+- 9 个工具自动发现注册
+
+## QuickStart
+
+### 1. 启动 Python Server
+
+```bash
+git clone git@github.com:wenkangwei/paradise-agent.git
+cd paradise-agent/server
+pip install -r requirements.txt
+
+# 启动 server (需先安装 Ollama 并拉取模型)
+PYTHONPATH=server NO_PROXY='*' python3 -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+### 2. 安装 Ollama 并拉取模型
+
+```bash
+# 安装 Ollama (Linux / WSL2)
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 拉取模型
+ollama pull qwen2.5:7b-instruct     # 对话模型（推荐，支持 tool calling）
+ollama pull qwen2.5vl:7b            # 图片理解模型
+ollama pull qwen2.5:3b              # 摘要/改写用的小模型
+```
+
+### 3. 编译安装 Android App
+
+```bash
+cd paradise-agent
+./gradlew assembleDebug
+# APK: app/build/outputs/apk/debug/app-debug.apk
+```
+
+用 adb 安装到手机：
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+### 4. 配置手机连接
+
+打开 App → 设置 → 模型 API 配置 → 新增：
+
+| 字段 | 值 |
+|------|-----|
+| 供应商 | Custom |
+| Base URL | `http://<PC_IP>:8000/v1/agent/chat/completions` |
+| fullUrlMode | 开 |
+| 模型名 | `qwen2.5:7b-instruct` |
+
+`<PC_IP>` 替换为电脑的局域网 IP（`ipconfig` 查看）。
+
+> 手机和电脑需在同一 WiFi 下。也可用 ZeroNews / Tailscale / Cloudflare Tunnel 做内网穿透。
+
+### 5. Vosk 离线语音识别（可选）
+
+下载模型推送到手机：
+```bash
+# 下载 vosk-model-small-cn-0.22.zip 解压后
+adb push vosk-model-small-cn-0.22 /sdcard/vosk-model
+```
+
+无 Vosk 模型时走服务端 Whisper STT。
 
 ## 项目结构
 
 ```
-android-app/
+paradise-agent/
 ├── app/                    # Android 客户端 (Kotlin + Compose + Hilt)
 │   └── src/main/java/com/example/aichat/
-│       ├── data/           # 数据层: Room DB, API, Mapper, Repository
-│       ├── domain/         # 领域层: Models, UseCase, Repository interface
-│       ├── di/             # Hilt DI 模块
+│       ├── data/           # Room DB, API, Mapper, Repository
+│       ├── domain/         # Models, UseCase
+│       ├── di/             # Hilt DI
 │       ├── service/        # :streaming 进程 StreamingService
-│       ├── ui/             # Compose UI: chat, settings, navigation, theme
-│       ├── feature/        # 功能页面: 设置首页, API配置, Placeholder
-│       └── util/           # 工具: CrashReporter, HonorOemHelper
-├── server/                 # Python agent 服务端 (FastAPI + paradise)
-│   ├── paradise/           # Agent 框架 (52 py, ~9100行)
-│   ├── api/routes/         # 路由: openai_proxy (Ollama 代理)
-│   ├── main.py             # 入口
-│   ├── requirements.txt    # 依赖
-│   └── start.sh            # 一键启动
-├── docs/                   # 文档: API Gateway Spec, Bug Catalog
-├── DEVELOPMENT_LOG.md      # 版本开发日志
-└── REVIEW.md               # Code review 记录
+│       ├── ui/             # Compose UI
+│       ├── feature/        # 设置页、语音配置、用户画像
+│       └── util/           # CrashReporter, OcrHelper, TTS
+├── server/                 # Python Agent Server (FastAPI + paradise)
+│   ├── paradise/           # Agent 框架
+│   │   ├── core/           # Agent, Channel, Context
+│   │   ├── tools/          # 9个自动注册工具
+│   │   ├── transports/     # LLM 传输层 (OpenAI/Anthropic/Ollama)
+│   │   ├── memory/         # 记忆管理
+│   │   ├── prompt/         # Prompt 构造
+│   │   ├── heartbeat/      # 心跳机制
+│   │   └── reflection/     # 反思引擎
+│   ├── api/routes/         # openai_proxy
+│   ├── main.py             # FastAPI 入口
+│   ├── agent_handler.py    # Agent 会话管理 + SSE
+│   ├── context_compactor.py # Token感知上下文压缩
+│   ├── model_router.py     # 模型能力检测+路由
+│   └── turn_logger.py      # 对话日志+训练数据导出
+├── docs/                   # 文档 + 截图
+└── SERVER_SYNC_TODO.md     # 开发待办路线图
 ```
 
-## Quickstart
-
-### Android 客户端
-
-**前置条件**：Android Studio Hedgehog+ / JDK 17 / Gradle 8.7
-
-```bash
-cd android-app
-./gradlew assembleDebug
-# APK 输出: app/build/outputs/apk/debug/app-debug.apk
-```
-
-安装后进入 **设置 → 模型 API 配置**，新增一个 API profile：
-- 供应商：**Custom** (OpenAI 兼容)
-- Base URL：Ollama `http://<PC_IP>:11434/v1` 或直接指向 server
-- API Key：Ollama 可不填
-- 模型名：`qwen2.5:3b`
-
-### Python Server (可选)
-
-用于把 PC 上的 Ollama 暴露给手机（通过 ZeroNews/Tailscale/局域网）：
-
-```bash
-cd android-app/server
-pip install -r requirements.txt    # 首次
-bash start.sh                       # 启动 :8000
-```
-
-Ollama 需先安装并拉取模型：
-```bash
-ollama pull qwen2.5:3b
-```
-
-## 核心机制
-
-### 双进程拓扑
-
-```
-┌─ 主进程 (com.example.aichat) ────────────────────┐
-│  Compose UI + ChatViewModel                       │
-│  Room DB (读写，与 :streaming 共享)                 │
-└───────────────────────────────────────────────────┘
-         │ Room multi-instance invalidation (~100ms)
-┌─ :streaming 进程 ────────────────────────────────┐
-│  StreamingService (foregroundServiceType=dataSync)│
-│  StreamAiReplyUseCase + OkHttp SSE                │
-│  Map<convId, Job> 多 session 并发                 │
-│  MAX_CONCURRENT_STREAMS = 5                       │
-└───────────────────────────────────────────────────┘
-```
-
-### 消息状态机
-
-```
-          ┌── useCase 插入 placeholder
-          ▼
-      STREAMING ──persist tick (150ms)──► STREAMING  (循环 ~7Hz)
-               ├── Finish ──► COMPLETE
-               └── Cancel/Error ──► INTERRUPTED / FAILED
-```
-
-### 设计原则
-
-1. **Room 是唯一真相源**：UI 不从 ViewModel 维护"乐观状态"，所有 messages 来自 `observeMessages(convId): Flow<List<Message>>`
-2. **多 session 并发**：ChatGPT 风格，切 session 不中断后台流；同 convId 定向 cancel，不同 convId 并行
-3. **Foreground Service 无条件 startForeground**：Android 14+ 要求 `startForegroundService()` 后 5s 内调用，否则闪退
-
-## API 端点 (Server)
+## API 端点
 
 | 端点 | 用途 |
 |------|------|
 | `GET /api/health` | 健康检查 |
-| `POST /v1/chat/completions` | OpenAI 兼容聊天（streaming + non-streaming） |
+| `POST /v1/chat/completions` | OpenAI 兼容（thin proxy 兜底） |
+| `POST /v1/agent/chat/completions` | **Agent 对话** (ReAct loop) |
+| `POST /api/stt/transcribe` | Whisper 语音转文字 |
 | `GET /v1/models` | 模型列表 |
 
-默认转发到 `localhost:11434` (Ollama)，可通过 `INFER_BASE_URL` 环境变量覆盖：
-```bash
-INFER_BASE_URL=http://localhost:8001 bash start.sh   # 指向 ORPO serve_orpo
+## 使用示例
+
+### 文本对话
+```
+输入: 帮我写一段Python快速排序代码
+Agent: [思考] → [TOOL: 无] → [RESPOND] → 流式输出代码
 ```
 
-## Server ↔ aipet-social 同步
+### 网页搜索
+```
+输入: 搜索最近AI领域的重要新闻
+Agent: [TOOL: web_search] → Query改写 → 多词搜索 → 抓取内容 → RAG摘要
+       → 思考框: 搜索词 + 结果列表 → 回复正文 + 搜索结果卡片
+```
 
-paradise agent 框架来自 `/home/wwk/workspace/ai_project/aipet-social/` (commit `a8063ea`)。
-当前 android-app 侧是开发分支，稳定后反向同步回 aipet-social。
-详见 `SERVER_SYNC_TODO.md`。
+### 语音输入
+```
+按住🎤 → 说话 → 松手 → Whisper转文字 → 自动发送
+```
 
-## 构建技术栈
+### 图片理解
+```
+⊕ → 拍照 → 描述图片 → vision_analyze → 回复图片描述
+```
+
+## Agent 工具集（9个）
+
+| 工具 | 用途 |
+|------|------|
+| `bash` | 执行 Bash 命令 |
+| `read_file` | 读取文件内容 |
+| `search_files` | 文件搜索 |
+| `vision_analyze` | 图片理解 (qwen2.5vl) |
+| `file_parse` | 文件解析 (PDF/DOCX/TXT) |
+| `web_search` | 网页搜索 (Bing) + Query改写 + RAG |
+| `web_fetch` | 网页内容抓取 |
+| `context_expand` | 上下文摘要展开 |
+| `yolo_detect` | YOLOv8 物体检测 |
+
+加新工具：在 `server/paradise/tools/` 目录放 `.py` 文件 → 自动发现注册。
+
+## 技术栈
 
 | 层 | 技术 |
-|----|------|
-| UI | Jetpack Compose (BOM 2024.x) |
-| DI | Hilt + KSP (useKSP2=false) |
-| DB | Room (v8, multiInstanceInvalidation) |
-| 网络 | OkHttp + SSE (30s ping keep-alive) |
-| 后台 | ForegroundService (dataSync type) |
-| 加密 | Android Keystore (API key 存储) |
-| Server | FastAPI + httpx + Ollama |
-| Agent | Paradise Framework (hermes 模型) |
+|------|------|
+| Android UI | Jetpack Compose + Material 3 |
+| DI | Hilt + KSP |
+| DB | Room v8 (multiInstanceInvalidation) |
+| 网络 | OkHttp + SSE + Retrofit |
+| 后台 | ForegroundService (dataSync) |
+| Server | FastAPI + httpx |
+| LLM | Ollama (qwen2.5 + qwen2.5vl) |
+| Speech | Whisper (faster-whisper) + Vosk |
+| Vision | YOLOv8-nano + ML Kit OCR |
+| Agent | Paradise Framework (ReAct loop) |
+
+## 开发路线
+
+详见 [SERVER_SYNC_TODO.md](SERVER_SYNC_TODO.md) — 11项待办含 Planning + Multi-Agent + LoRA异步训练架构。
