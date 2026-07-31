@@ -103,25 +103,69 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
                     search_queries.append(rq)
         logger.info("web_search queries: %s", search_queries)
 
-        # ── Search with all queries ─────────────────────────────
+        # ── Multi-source search ─────────────────────────────────
+        # Run all available backends in parallel
+        import asyncio as _asyncio
         all_results = []
         seen_urls = set()
-        for q in search_queries:
-            if backend == "brave":
-                result = _search_brave(q, limit)
-            elif backend == "searxng":
-                result = _search_searxng(q, limit)
-            else:
-                result = _search_bing(q, limit)
-            for r in result.get("data", {}).get("web", []):
-                url = r.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    all_results.append(r)
 
+        async def _search_one(q: str, src: str):
+            """Search one query on one backend."""
+            results = []
+            try:
+                if src == "bing":
+                    r = _search_bing(q, limit)
+                elif src == "searxng":
+                    r = _search_searxng(q, limit)
+                elif src == "brave":
+                    r = _search_brave(q, limit)
+                else:
+                    return []
+                for item in r.get("data", {}).get("web", []):
+                    item["_source"] = src
+                    results.append(item)
+            except Exception as e:
+                logger.debug("Search %s on %s failed: %s", q[:30], src, e)
+            return results
+
+        # Determine which backends to use
+        backends = ["bing"]  # always use Bing
+        if os.getenv("BRAVE_SEARCH_API_KEY", "").strip():
+            backends.append("brave")
+        if os.getenv("SEARXNG_URL", "").strip():
+            backends.append("searxng")
+
+        # Run all backends × all queries in parallel
+        tasks = [_search_one(q, src) for q in search_queries for src in backends]
+        batch_results = await _asyncio.gather(*tasks)
+
+        # Merge: interleave results from different sources for diversity
+        sources = {src: [] for src in backends}
+        for i, results in enumerate(batch_results):
+            src = backends[i % len(backends)]
+            sources[src].extend(results)
+
+        # Round-robin merge: take 1 from each source
+        max_per_source = max(len(v) for v in sources.values()) if sources else 0
+        merged = []
+        for i in range(max_per_source):
+            for src in backends:
+                src_results = sources.get(src, [])
+                if i < len(src_results):
+                    r = src_results[i]
+                    url = r.get("url", "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        merged.append(r)
+        all_results = merged[:limit * 2]  # fetch more for reranking
+        logger.info("web_search: %d results from %d sources", len(all_results), len(backends))
+
+        # ── LLM Re-ranking: score by relevance to query ─────────────
+        if len(all_results) > 3 and os.getenv("WEB_SEARCH_RERANK", "1") not in ("0", "false", "no"):
+            all_results = await _rerank_results(all_results, query)
         web_results = all_results[:limit]
         result_count = len(web_results)
-        logger.info("web_search: %d results for '%s'", result_count, query)
+        logger.info("web_search: %d results for '%s' after rerank", result_count, query)
 
         # ── RAG Pipeline: Search → Fetch → Summarize → Format ──────
         auto_fetch = os.getenv("WEB_SEARCH_AUTO_FETCH", "1") not in ("0", "false", "no")
@@ -436,6 +480,68 @@ async def _rewrite_query(query: str, context: str = "") -> list[str]:
     except Exception as e:
         logger.debug("Query rewrite failed: %s", e)
         return []
+
+
+# ── Re-ranking ──────────────────────────────────────────────────
+
+async def _rerank_results(results: list[dict], query: str) -> list[dict]:
+    """Use a fast LLM to score search results by relevance to the query.
+
+    Returns results sorted by relevance (highest first).
+    """
+    if not results:
+        return results
+
+    # Build prompt with titles + snippets
+    items_text = []
+    for i, r in enumerate(results):
+        title = r.get("title", "")[:100]
+        snippet = r.get("description", "")[:200]
+        items_text.append(f"{i}: {title} | {snippet}")
+
+    prompt = (
+        "Rate each search result's relevance to the query on a scale of 0-10. "
+        "Output ONLY the numbers, one per line, in the same order.\n\n"
+        f"Query: {query}\n\n" + "\n".join(items_text) + "\n\nScores:"
+    )
+
+    try:
+        import httpx as _httpx
+        ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        async with _httpx.AsyncClient(
+            timeout=_httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0),
+        ) as client:
+            resp = await client.post(
+                f"{ollama_base.rstrip('/')}/v1/chat/completions",
+                json={
+                    "model": os.getenv("QUERY_REWRITE_MODEL", "qwen2.5:3b"),
+                    "stream": False,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1, "max_tokens": len(results) * 5,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        # Parse scores
+        scores = []
+        import re as _re
+        for line in content.strip().split("\n"):
+            m = _re.search(r'(\d+)', line)
+            if m:
+                scores.append(int(m.group(1)))
+
+        if scores and len(scores) >= len(results):
+            # Sort by score descending
+            scored = list(zip(results, scores))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            logger.info("Reranked %d results, top score: %d", len(scored), scored[0][1] if scored else 0)
+            return [r for r, _ in scored]
+
+    except Exception as e:
+        logger.debug("Reranking failed: %s", e)
+    return results
 
 
 # ── RAG Summarization ────────────────────────────────────────────
