@@ -33,11 +33,14 @@ BING_SEARCH_URL = "https://cn.bing.com/search"
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 TIMEOUT = 15.0
 
-# Knowledge base sites — when user asks about lifestyle/food/travel/etc.,
-# these sites are searched for high-quality Chinese content.
-_KNOWLEDGE_SITES = os.getenv("SEARCH_KNOWLEDGE_SITES", "").strip()
-if not _KNOWLEDGE_SITES:
-    _KNOWLEDGE_SITES = "xiaohongshu.com OR zhihu.com OR weixin.qq.com"
+# Chinese content platforms — always searched as an additional source.
+_CONTENT_SITES = os.getenv("SEARCH_CONTENT_SITES", "").strip()
+if not _CONTENT_SITES:
+    _CONTENT_SITES = (
+        "zhihu.com OR xiaohongshu.com OR juejin.cn OR "
+        "mp.weixin.qq.com OR sohu.com OR news.qq.com OR "
+        "weibo.com OR bilibili.com OR csdn.net"
+    )
 MAX_RESULTS_DEFAULT = int(os.getenv("WEB_SEARCH_DEFAULT_LIMIT", "15"))
 FETCH_COUNT_DEFAULT = int(os.getenv("WEB_SEARCH_FETCH_COUNT", "5"))
 SEARCH_EMOJI = "\U0001f50d"
@@ -118,12 +121,11 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
                 if rq and rq != query and _similar_enough(query, rq):
                     search_queries.append(rq)
 
-        # ── Knowledge base site targeting ────────────────────────
-        # Add site-scoped queries for lifestyle/how-to queries
-        if _should_search_knowledge_sites(query):
-            kq = f"({query}) site:({_KNOWLEDGE_SITES})"
-            search_queries.append(kq)
-            logger.info("web_search: added knowledge site query")
+        # ── Content platform search (always) ──────────────────────
+        # Always search Chinese content platforms for richer results
+        kq = f"({query}) site:({_CONTENT_SITES})"
+        search_queries.append(kq)
+        logger.info("web_search: added content site query")
 
         logger.info("web_search queries: %s", search_queries[:4])
 
