@@ -190,21 +190,79 @@ def _extract_text(html: str) -> str:
     """Extract readable text from HTML.
 
     Strategy:
-    1. Remove script/style/nav/footer/header elements
-    2. Remove HTML comments
-    3. Remove all remaining tags
-    4. Decode HTML entities
-    5. Collapse whitespace
+    1. Try to find main content area (<article>, <main>, content divs)
+    2. Fall back to full page extraction
+    3. Remove scripts, styles, navigation
+    4. Score paragraphs by text density to filter boilerplate
     """
+    # Try to extract main content area first
+    main_html = _extract_main_content(html)
+
     # Remove scripts, styles, nav, footer, header
-    text = _STRIP_TAGS.sub(' ', html)
-    # Remove comments
+    text = _STRIP_TAGS.sub(' ', main_html)
     text = _STRIP_COMMENTS.sub(' ', text)
-    # Remove all remaining HTML tags
     text = _STRIP_TAGS_ALL.sub(' ', text)
-    # Collapse whitespace + clean
     text = _clean_text(text)
+
+    # Filter low-quality paragraphs (boilerplate)
+    paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+    scored = [(p, _content_score(p)) for p in paragraphs]
+    # Keep paragraphs with reasonable text density (>0.3 score)
+    good_paragraphs = [p for p, s in scored if s > 0.3]
+    if len(good_paragraphs) >= 2:
+        return '\n'.join(good_paragraphs)
     return text
+
+
+def _extract_main_content(html: str) -> str:
+    """Try to extract the main content area from HTML.
+
+    Looks for: <article>, <main>, role="main", common content divs.
+    Falls back to full HTML if no content area found.
+    """
+    import re as _re
+
+    # Priority extraction targets
+    patterns = [
+        r'<article[^>]*>(.*?)</article>',
+        r'<main[^>]*>(.*?)</main>',
+        r'<div[^>]*role=["\']main["\'][^>]*>(.*?)</div>',
+        r'<div[^>]*class=["\'][^"\']*(?:content|post|article|entry|body|text)[^"\']*["\'][^>]*>(.*?)</div>',
+        r'<div[^>]*id=["\'][^"\']*(?:content|post|article|entry|body|text)[^"\']*["\'][^>]*>(.*?)</div>',
+        r'<section[^>]*class=["\'][^"\']*(?:content|post|article|entry)[^"\']*["\'][^>]*>(.*?)</section>',
+    ]
+
+    for pattern in patterns:
+        matches = _re.findall(pattern, html, _re.DOTALL | _re.IGNORECASE)
+        if matches:
+            # Use the longest match (most likely the real content)
+            best = max(matches, key=len)
+            if len(best) > 200:
+                return best
+
+    return html
+
+
+def _content_score(text: str) -> float:
+    """Score paragraph quality. Higher = more likely to be real content.
+
+    Penalizes: short text, navigation text (contains many links),
+               cookie/privacy notices, copyright, boilerplate.
+    """
+    if len(text) < 20:
+        return 0.0
+    # Penalize common boilerplate patterns
+    boilerplate_patterns = [
+        'cookie', 'privacy', 'copyright', '©', 'all rights reserved',
+        'subscribe', 'newsletter', 'advertisement', 'sponsored',
+        '首页', '登录', '注册', '导航', 'footer', 'header',
+        '上一篇', '下一篇', '分享到', '点赞', '收藏',
+        'function(', 'var ', 'const ', 'let ', '=>', '{', '}',
+    ]
+    text_lower = text.lower()
+    penalty = sum(1 for bp in boilerplate_patterns if bp in text_lower)
+    base = min(len(text) / 200.0, 1.0)  # 200+ chars = full score
+    return max(0.0, base - penalty * 0.15)
 
 
 def _clean_text(text: str) -> str:

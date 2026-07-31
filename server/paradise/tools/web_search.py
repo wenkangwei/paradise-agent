@@ -366,21 +366,22 @@ def _clean_html(text: str) -> str:
 
 # ── RAG Summarization ────────────────────────────────────────────
 
-_SUMMARIZE_PROMPT = """Extract key information from this web page content related to the search query.
+_SUMMARIZE_PROMPT = """You are a search result summarizer. Extract ONLY the information relevant to the user's search query from the web page content below.
 
-Rules:
-- Output 3-5 bullet points in clean markdown
-- Extract facts, data, code snippets, and actionable info
-- Ignore navigation menus, ads, cookie banners, boilerplate
-- Keep original technical terms and numbers
-- Each bullet: one specific fact or insight
-- Be concise — total output under 300 words
+CRITICAL RULES:
+- Output 3-5 bullet points MAXIMUM
+- Each bullet: ONE specific fact, number, or insight directly answering the query
+- Strip ALL navigation, ads, cookie notices, login prompts, sidebars
+- If the content is just a menu/header/footer with no real information, output "No relevant content found on this page"
+- Use plain text, NO markdown formatting (no ##, no **, no code blocks)
+- Be EXTREMELY concise — total output under 200 words
+- Preserve original numbers, dates, version strings exactly
 
-Format:
-## [Page Title]
-- Key point 1
-- Key point 2
-- ..."""
+Output format (plain text, no markdown):
+Page: [title]
+- fact 1
+- fact 2
+- fact 3"""
 
 
 async def _summarize_pages(pages: list[tuple[str, str, str, str]]) -> list[str]:

@@ -431,10 +431,18 @@ class ParadiseAgent:
         """
         # Minimal system prompt for AiChat Android use case
         agent_name = ctx.agent_name or "AI助手"
-        system_prompt = (
-            f"你是{agent_name}，一个有用的AI助手。\n"
-            f"{FORMAT_SUFFIX}"
-        )
+        base_prompt = f"你是{agent_name}，一个有用的AI助手。\n"
+        if tool_results:
+            base_prompt += (
+                "你刚才使用了搜索工具获取了信息。请基于搜索结果简洁回答用户问题。\n"
+                "规则：\n"
+                "- 不要输出搜索工具调用过程、URL、代码脚本\n"
+                "- 不要输出网页标题（### 1. xxx）等格式标记\n"
+                "- 用自然的段落形式总结，2-5句话\n"
+                "- 只输出对用户有用的信息\n"
+            )
+        base_prompt += FORMAT_SUFFIX
+        system_prompt = base_prompt
 
         # Add compacted context summaries if available
         compact_context = getattr(ctx, '_compact_context', '') or ''

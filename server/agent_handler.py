@@ -472,30 +472,19 @@ async def process_message_stream(
                         result=event.get("result", ""),
                         duration_ms=event.get("duration_ms", 0),
                     )
-                # Emit tool call as formatted indicator (brief, not full result)
+                # Brief indicator — results go into agent context only
                 tool_name = event.get("name", "tool")
                 tool_emoji = _tool_emoji(tool_name)
                 tool_duration = event.get("duration_ms", 0)
-                tool_info = f"\n{tool_emoji} {tool_name} ({tool_duration:.0f}ms)\n"
-                content_full.append(tool_info)
+                # Emit reasoning delta so Android shows it in thinking section
+                tool_info = f"{tool_emoji} {tool_name} ({(tool_duration/1000):.1f}s)"
                 yield _sse_chunk({
                     "choices": [{
                         "index": 0,
-                        "delta": {"content": tool_info},
+                        "delta": {"reasoning_content": tool_info + "\n"},
                         "finish_reason": None,
                     }],
                 })
-                # Also yield the actual result as content for the LLM to see
-                result_text = event.get("result", "")
-                if result_text:
-                    content_full.append(result_text)
-                    yield _sse_chunk({
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"content": result_text},
-                            "finish_reason": None,
-                        }],
-                    })
 
             elif evt_type == "error":
                 if recorder:
