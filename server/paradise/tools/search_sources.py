@@ -86,6 +86,54 @@ class Platform:
         self.extractor = extractor
 
 
+# ── XHS MCP search (HTTP API on localhost:18060) ─────────────────
+
+async def search_xiaohongshu(query: str, limit: int = 5) -> list[dict]:
+    """Search Xiaohongshu via local MCP server.
+
+    Requires: xiaohongshu-mcp running on localhost:18060 AND logged in.
+    Login: ~/.openclaw/workspace/skills/xiaohongshu-mcp/xiaohongshu-login-linux-amd64
+    """
+    import json as _json
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "http://localhost:18060/api/v1/feeds/search",
+                json={"keyword": query, "filters": {
+                    "sort_by": "综合", "note_type": "不限", "publish_time": "不限"
+                }},
+            )
+            data = resp.json()
+            if not data.get("success"):
+                logger.debug("XHS search failed: %s", data.get("error", ""))
+                return []
+
+            feeds = data.get("data", {}).get("feeds", [])
+            results = []
+            for f in feeds[:limit]:
+                note = f.get("noteCard", {})
+                user = note.get("user", {})
+                interact = note.get("interactInfo", {})
+                results.append({
+                    "title": note.get("displayTitle", ""),
+                    "url": f"https://www.xiaohongshu.com/explore/{f.get('id', '')}",
+                    "description": f"作者: {user.get('nickname', '')} | 赞: {interact.get('likedCount', 0)}",
+                    "source": "小红书",
+                    "feed_id": f.get("id"),
+                    "xsec_token": f.get("xsecToken"),
+                })
+            logger.info("XHS search: %d results for '%s'", len(results), query)
+            return results
+    except httpx.ConnectError:
+        logger.debug("XHS MCP server not running on localhost:18060")
+        return []
+    except Exception as e:
+        logger.debug("XHS search error: %s", e)
+        return []
+
+
+# ── Platform definitions ──────────────────────────────────────────
+
 PLATFORMS: dict[str, Platform] = {
     "zhihu": Platform("zhihu", "知乎",
         "https://www.zhihu.com/search?type=content&q={query}",
@@ -118,7 +166,7 @@ def get_enabled_platforms() -> list[str]:
 # ── Search entry ──────────────────────────────────────────────────
 
 async def search_platforms(query: str, limit: int = 5) -> list[dict]:
-    """Search all enabled platforms using Playwright, return merged results."""
+    """Search all enabled platforms + XHS MCP, return merged results."""
     platforms = get_enabled_platforms()
     if not platforms:
         return []
@@ -126,6 +174,8 @@ async def search_platforms(query: str, limit: int = 5) -> list[dict]:
     browser = await _get_browser()
     try:
         tasks = [_search_one_platform(p, query, limit) for p in platforms]
+        # XHS MCP search (no browser needed)
+        tasks.append(search_xiaohongshu(query, limit))
         all_results = await asyncio.gather(*tasks)
 
         # Round-robin merge
