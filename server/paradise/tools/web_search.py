@@ -93,6 +93,11 @@ WEB_SEARCH_SCHEMA = {
 
 async def _handle_web_search(args: dict[str, Any]) -> str:
     """Execute a web search with RAG pipeline: search → fetch → summarize → format."""
+    import time as _time2
+    t0 = _time2.time()
+    def _tick(label):
+        logger.warning("[web_search ⏱ %5.1fs] %s", _time2.time() - t0, label)
+
     query = args.get("query", "")
     context = args.get("_context", "")  # from agent: time, user profile, history context
     sites = args.get("sites", []) or []
@@ -100,6 +105,8 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
 
     if not query.strip():
         return tool_error("search query is empty")
+
+    _tick(f"start: query='{query[:60]}'")
 
     # Build site-scoped query if sites are specified
     if sites and isinstance(sites, list) and len(sites) > 0:
@@ -127,6 +134,7 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
         search_queries.append(kq)
         logger.info("web_search: added content site query")
 
+        _tick(f"rewrite done: {len(search_queries)} queries")
         logger.info("web_search queries: %s", search_queries[:4])
 
         # ── Multi-source search ─────────────────────────────────
@@ -196,6 +204,7 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
                         seen_urls.add(url)
                         merged.append(r)
         all_results = merged[:limit * 2]  # fetch more for reranking
+        _tick(f"search done: {len(all_results)} raw results from {len(backends)} sources")
         logger.info("web_search: %d results from %d sources", len(all_results), len(backends))
 
         # ── LLM Re-ranking: score by relevance to query ─────────────
@@ -203,6 +212,7 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
             all_results = await _rerank_results(all_results, query)
         web_results = all_results[:limit]
         result_count = len(web_results)
+        _tick(f"rerank done: {result_count} results kept")
         logger.info("web_search: %d results for '%s' after rerank", result_count, query)
 
         # ── RAG Pipeline: Search → Fetch → Summarize → Format ──────
@@ -211,22 +221,35 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
         fetch_count = min(int(os.getenv("WEB_SEARCH_FETCH_COUNT", str(FETCH_COUNT_DEFAULT))), 10)
 
         if auto_fetch and web_results:
-            urls = [r["url"] for r in web_results[:fetch_count] if r.get("url")]
+            urls = [(i, r["url"]) for i, r in enumerate(web_results[:fetch_count]) if r.get("url")]
             if urls:
-                from paradise.tools.web_fetch import fetch_and_extract
-                for i, url in enumerate(urls):
+                # Parallel fetch — all URLs fetched simultaneously
+                async def _fetch_one(idx: int, url: str):
                     try:
+                        from paradise.tools.web_fetch import fetch_and_extract
                         content, title, error = fetch_and_extract(url, max_chars=5000)
-                        if not error and content:
-                            web_results[i]["fetched_title"] = title
-                            web_results[i]["fetched_content"] = content
-                    except Exception as e:
-                        logger.debug("Auto-fetch failed for %s: %s", url[:60], e)
+                        if error or not content:
+                            return idx, None, None
+                        # Content quality filter: drop pages with < 100 chars
+                        if len(content.strip()) < 100:
+                            return idx, None, None
+                        return idx, title, content
+                    except Exception:
+                        return idx, None, None
 
-                # ── Summarize each fetched page via small LLM ──────
+                fetch_tasks = [_fetch_one(i, u) for i, u in urls]
+                fetch_results = await _asyncio.gather(*fetch_tasks)
+
+                for idx, title, content in fetch_results:
+                    if content:
+                        web_results[idx]["fetched_title"] = title
+                        web_results[idx]["fetched_content"] = content
+
+                # ── Summarize fetched pages (skip garbage) ──────────
                 if auto_summarize:
-                    logger.info("web_search: summarizing %d fetched pages", fetch_count)
                     fetched = [r for r in web_results[:fetch_count] if r.get("fetched_content")]
+                    logger.info("web_search: summarizing %d pages (from %d fetched)",
+                                len(fetched), len([r for r in web_results[:fetch_count] if r.get("fetched_content") is not None]))
                     if fetched:
                         summaries = await _summarize_pages(
                             [(r.get("fetched_content", ""), r.get("fetched_title", ""),
@@ -237,7 +260,10 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
                             if summary:
                                 fetched[i]["fetched_content"] = summary
 
-        return _format_results(web_results)
+        _tick(f"complete: {result_count} final results")
+        # Add timing debug info at the end of results (hidden from LLM)
+        debug_info = f"\n<!-- DEBUG: {len(all_results)} recalled, {result_count} after rerank, {len(backends)} sources -->"
+        return _format_results(web_results) + debug_info
 
     except Exception as e:
         logger.warning("web_search error: %s", e)

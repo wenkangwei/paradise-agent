@@ -488,12 +488,15 @@ async def process_message_stream(
                         "finish_reason": None,
                     }],
                 })
-                # web_search: emit results as structured ToolCard for Android UI
+                # web_search: emit results + timing details into reasoning
                 if tool_name == "web_search":
                     query = event.get('arguments', {}).get('query', '')
-                    cards = _parse_search_result_cards(event.get("result", ""))
+                    result_text = event.get("result", "")
+                    cards = _parse_search_result_cards(result_text)
+                    duration_ms = event.get("duration_ms", 0)
+
                     if cards:
-                        # Emit tool_cards for SearchResultsSection button
+                        # Emit tool_cards for Android UI
                         yield _sse_chunk({
                             "choices": [{
                                 "index": 0,
@@ -507,10 +510,28 @@ async def process_message_stream(
                                 "finish_reason": None,
                             }],
                         })
-                        # Emit search summary into reasoning for thinking section
-                        lines = [f"\n[搜索词]: {query}", f"[搜索结果]:"]
-                        for c in cards[:5]:
-                            lines.append(f"  - {c.get('title', '')}")
+
+                        # Rich debug info in reasoning section
+                        lines = [
+                            f"\n┌─ web_search 详情 ─────────────────────",
+                            f"│ 搜索词: {query}",
+                            f"│ 耗时: {(duration_ms/1000):.1f}s",
+                            f"│ 结果数: {len(cards)} 条",
+                        ]
+                        # Show result source breakdown
+                        sources = {}
+                        for c in cards:
+                            src = c.get("_source", "unknown")
+                            sources[src] = sources.get(src, 0) + 1
+                        if sources:
+                            lines.append(f"│ 来源分布: {dict(sources)}")
+                        lines.append(f"│")
+                        lines.append(f"│ 结果列表:")
+                        for c in cards[:8]:
+                            src_tag = c.get("_source", "")
+                            src_str = f"[{src_tag}]" if src_tag else ""
+                            lines.append(f"│ {src_str} {c.get('title', '')[:60]}")
+                        lines.append(f"└──────────────────────────────────────")
                         yield _sse_chunk({
                             "choices": [{
                                 "index": 0,
