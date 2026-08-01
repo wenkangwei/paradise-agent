@@ -20,6 +20,7 @@ import os
 import re
 from typing import Any
 
+import httpx
 from playwright.async_api import async_playwright, Browser, BrowserContext
 
 logger = logging.getLogger(__name__)
