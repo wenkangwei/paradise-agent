@@ -87,49 +87,78 @@ class Platform:
         self.extractor = extractor
 
 
-# ── XHS MCP search (HTTP API on localhost:18060) ─────────────────
+# ── XHS search via Playwright (direct browser, no MCP) ──────────
 
 async def search_xiaohongshu(query: str, limit: int = 5) -> list[dict]:
-    """Search Xiaohongshu via local MCP server.
+    """Search Xiaohongshu via Playwright — opens search page, extracts results.
 
-    Requires: xiaohongshu-mcp running on localhost:18060 AND logged in.
-    Login: ~/.openclaw/workspace/skills/xiaohongshu-mcp/xiaohongshu-login-linux-amd64
+    Uses cookies from Chrome for authentication.
     """
     import json as _json
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                "http://localhost:18060/api/v1/feeds/search",
-                json={"keyword": query, "filters": {
-                    "sort_by": "综合", "note_type": "不限", "publish_time": "不限"
-                }},
-            )
-            data = resp.json()
-            if not data.get("success"):
-                logger.debug("XHS search failed: %s", data.get("error", ""))
-                return []
+        browser = await _get_browser()
+        context = await browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width": 1280, "height": 800},
+            locale="zh-CN",
+        )
+        # Load cookies from Chrome
+        cookie_file = os.path.expanduser("~/.openclaw/workspace/skills/xiaohongshu-mcp/cookies.json")
+        if os.path.exists(cookie_file):
+            with open(cookie_file) as f:
+                cookies = _json.load(f)
+            await context.add_cookies([{
+                "name": c["name"], "value": c["value"],
+                "domain": c.get("domain", ".xiaohongshu.com"),
+                "path": c.get("path", "/"),
+            } for c in cookies if c.get("name")])
 
-            feeds = data.get("data", {}).get("feeds", [])
-            results = []
-            for f in feeds[:limit]:
-                note = f.get("noteCard", {})
-                user = note.get("user", {})
-                interact = note.get("interactInfo", {})
-                results.append({
-                    "title": note.get("displayTitle", ""),
-                    "url": f"https://www.xiaohongshu.com/explore/{f.get('id', '')}",
-                    "description": f"作者: {user.get('nickname', '')} | 赞: {interact.get('likedCount', 0)}",
-                    "source": "小红书",
-                    "feed_id": f.get("id"),
-                    "xsec_token": f.get("xsecToken"),
-                })
-            logger.info("XHS search: %d results for '%s'", len(results), query)
-            return results
-    except httpx.ConnectError:
-        logger.debug("XHS MCP server not running on localhost:18060")
-        return []
+        page = await context.new_page()
+        url = f"https://www.xiaohongshu.com/search_result?keyword={query}&type=51"
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        await asyncio.sleep(2)  # Wait for JS rendering
+
+        # Extract search result cards
+        items = await page.evaluate(f"""
+            () => {{
+                const cards = document.querySelectorAll(
+                    '[class*=\"note-item\"], [class*=\"search-result\"], section.note-item, a[href*=\"/explore/\"]'
+                );
+                const results = [];
+                cards.forEach(card => {{
+                    const title = (card.querySelector('[class*=\"title\"], .title, a')?.textContent || '').trim();
+                    const link = card.querySelector('a[href*=\"/explore/\"]')?.getAttribute('href') || '';
+                    if (title && link) {{
+                        results.push({{ title: title.substring(0, 100), link }});
+                    }}
+                }});
+                return results.slice(0, {limit * 2});
+            }}
+        """)
+
+        results = []
+        seen = set()
+        for item in items:
+            title = item.get("title", "").strip()
+            link = item.get("link", "")
+            if not title or not link or len(title) < 3:
+                continue
+            url = f"https://www.xiaohongshu.com{link}" if link.startswith("/") else link
+            if url in seen:
+                continue
+            seen.add(url)
+            results.append({
+                "title": title, "url": url,
+                "description": "", "source": "小红书",
+            })
+            if len(results) >= limit:
+                break
+
+        await context.close()
+        logger.info("XHS Playwright: %d results for '%s'", len(results), query)
+        return results
     except Exception as e:
-        logger.debug("XHS search error: %s", e)
+        logger.debug("XHS Playwright search failed: %s", str(e)[:100])
         return []
 
 
