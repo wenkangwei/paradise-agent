@@ -163,13 +163,25 @@ async def _handle_web_search(args: dict[str, Any]) -> str:
 
         # Run all backends × all queries in parallel
         tasks = [_search_one(q, src) for q in search_queries for src in backends]
+        # Also search content platforms directly
+        from paradise.tools.search_sources import search_platforms
+        tasks.append(search_platforms(query, limit))
         batch_results = await _asyncio.gather(*tasks)
 
         # Merge: interleave results from different sources for diversity
+        # Last batch entry is platform results (not from a backend)
+        platform_results = batch_results[-1] if isinstance(batch_results[-1], list) else []
+        backend_batches = batch_results[:-1]
+
         sources = {src: [] for src in backends}
-        for i, results in enumerate(batch_results):
+        for i, results in enumerate(backend_batches):
             src = backends[i % len(backends)]
             sources[src].extend(results)
+
+        # Add platform results as an extra source
+        if platform_results:
+            sources["platforms"] = platform_results
+            backends.append("platforms")
 
         # Round-robin merge: take 1 from each source
         max_per_source = max(len(v) for v in sources.values()) if sources else 0
