@@ -1,0 +1,56 @@
+log_dir: /home/wwk/workspace/ai_project/android-app/logs
+output_dir: /home/wwk/workspace/ai_project/android-app/logs/training
+deploy_dir: /home/wwk/workspace/ai_project/android-app/logs/training/deploy
+formats:
+- sft
+- dpo
+- grpo
+min_messages_per_session: 2
+dpo_negatives_per_positive: 1
+split_ratios:
+- 0.8
+- 0.1
+- 0.1
+random_seed: 42
+dpo_rules:
+  scoring:
+    llm_rewrite: 4
+    like: 3
+    unmarked: 2
+    retry: 1
+    dislike: 0
+  positive_sources:
+  - llm_rewrite
+  - like
+  - unmarked
+  negative_sources:
+  - retry
+  - dislike
+  pair_strategy: top_bottom
+  max_pairs_per_group: 3
+  min_score_gap: 1
+  min_response_length: 10
+  llm_rewrite_when_max_score_below: 3
+augment:
+  enabled: false
+  provider: ollama
+  ollama_url: http://localhost:11434/v1
+  ollama_model: qwen2.5:7b-instruct
+  openai_url: https://api.openai.com/v1
+  openai_model: gpt-4o-mini
+  openai_key: ''
+  dashscope_key: ''
+  dashscope_model: qwen-max
+  deepseek_key: ''
+  deepseek_model: deepseek-chat
+  deepseek_url: https://api.deepseek.com/v1
+  zhipu_key: ''
+  zhipu_model: glm-4-flash
+  concurrency: 3
+  variants_per_question: 2
+  refine_responses: true
+deploy:
+  ollama_base_model: qwen2.5:0.5b
+  ollama_model_name: aichat-sft
+  vllm_gpu_memory: 0.9
+  vllm_max_model_len: 4096
