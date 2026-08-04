@@ -5,6 +5,7 @@ import com.example.aichat.data.local.entity.MessageEntity
 import com.example.aichat.domain.model.Attachment
 import com.example.aichat.domain.model.Conversation
 import com.example.aichat.domain.model.Message
+import com.example.aichat.domain.model.MessageInteractions
 import com.example.aichat.domain.model.MessageMetadata
 import com.example.aichat.domain.model.MessageStatus
 import com.example.aichat.domain.model.Role
@@ -31,7 +32,8 @@ fun MessageEntity.toDomain(): Message = Message(
     status = runCatching { MessageStatus.valueOf(status) }.getOrDefault(MessageStatus.COMPLETE),
     reasoningContent = reasoningContent,
     metadata = metadataJson?.let(::parseMetadata),
-    reaction = reaction
+    reaction = reaction,
+    interactions = MessageInteractions.fromJson(interactionsJson)
 )
 
 fun Message.toEntity(): MessageEntity = MessageEntity(
@@ -44,7 +46,9 @@ fun Message.toEntity(): MessageEntity = MessageEntity(
     status = status.name,
     reasoningContent = reasoningContent,
     metadataJson = metadata?.let { gson.toJson(it) },
-    reaction = reaction
+    reaction = reaction,
+    interactionsJson = interactions?.toJson(),
+    feedbackSynced = 0
 )
 
 fun Conversation.toEntity(): ConversationEntity = ConversationEntity(

@@ -68,6 +68,9 @@ interface MessageDao {
     @Query("SELECT status FROM messages WHERE id = :id")
     suspend fun getStatusById(id: String): String?
 
+    @Query("SELECT * FROM messages WHERE id = :id")
+    suspend fun getById(id: String): MessageEntity?
+
     /**
      * Emits the set of conversationIds that currently have at least one message
      * in STREAMING state. Drives the drawer's green-dot indicator and the
@@ -78,4 +81,26 @@ interface MessageDao {
 
     @Query("DELETE FROM messages WHERE id = :id")
     suspend fun deleteById(id: String)
+
+    // ── Feedback collection queries (v10) ──────────────────────────
+
+    @Query("UPDATE messages SET interactionsJson = :json WHERE id = :id")
+    suspend fun updateInteractions(id: String, json: String)
+
+    @Query("UPDATE messages SET feedbackSynced = :synced WHERE id = :id")
+    suspend fun updateFeedbackSynced(id: String, synced: Int)
+
+    /**
+     * Returns all AI messages with unsynced feedback (reaction or interactions).
+     * Used by [FeedbackSyncUseCase] to batch-upload to server.
+     */
+    @Query(
+        "SELECT * FROM messages WHERE feedbackSynced = 0 " +
+            "AND (reaction IS NOT NULL OR interactionsJson IS NOT NULL) " +
+            "ORDER BY timestamp ASC"
+    )
+    suspend fun getUnsyncedFeedback(): List<MessageEntity>
+
+    @Query("SELECT * FROM messages WHERE conversationId = :convId AND timestamp > :since ORDER BY timestamp ASC")
+    suspend fun getMessagesSince(convId: String, since: Long): List<MessageEntity>
 }

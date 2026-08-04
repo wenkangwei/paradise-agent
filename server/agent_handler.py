@@ -263,6 +263,18 @@ async def process_message_stream(
     t0 = time.time()
     model_name = model or DEFAULT_MODEL
 
+    # Record user activity for proactive scheduler (reset cooldown)
+    try:
+        from proactive.scheduler import get_scheduler
+        scheduler = get_scheduler()
+        if scheduler.enabled:
+            scheduler.record_user_activity(conv_id)
+            # Auto-register for proactive checks if not already
+            if conv_id not in scheduler._tasks:
+                scheduler.register(conv_id, history_provider=_provide_history)
+    except Exception:
+        pass
+
     def _tick(label: str) -> None:
         """Log timing since request start."""
         elapsed = (time.time() - t0) * 1000
@@ -699,3 +711,23 @@ async def warmup_agent() -> None:
         logger.info("Agent warmup complete: model=%s tools=%s", DEFAULT_MODEL, ENABLE_TOOLS)
     except Exception as e:
         logger.warning("Agent warmup failed (non-fatal): %s", e)
+
+
+# ── History provider for ProactiveScheduler ──────────────────────────
+
+async def _provide_history(conv_id: str) -> list[dict]:
+    """Provide recent conversation history for proactive scheduling.
+
+    Reads from the in-memory Channel for the given conversation,
+    returning the last N messages in a format suitable for the LLM prompt.
+    """
+    channel = session_manager.get_channel(conv_id)
+    messages = []
+    for msg in channel.messages[-10:]:  # last 10 messages
+        messages.append({
+            "role": "assistant" if msg.sender_id == "assistant" else "user",
+            "content": msg.content,
+            "timestamp": msg.timestamp.timestamp() if hasattr(msg.timestamp, 'timestamp') else 0,
+        })
+    return messages
+

@@ -161,7 +161,23 @@ val MIGRATION_8_9 = object : Migration(8, 9) {
     }
 }
 
-/** All migrations from the initial v2 schema to the current v9. */
+/**
+ * v9 → v10: Add feedback collection fields for training data pipeline.
+ *
+ * `interactionsJson` stores accumulated interaction metrics per message
+ * (share count, retry count, TTS play count/duration).
+ * `feedbackSynced` tracks whether this message's feedback has been uploaded.
+ */
+val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE messages ADD COLUMN interactionsJson TEXT")
+        db.execSQL(
+            "ALTER TABLE messages ADD COLUMN feedbackSynced INTEGER NOT NULL DEFAULT 0"
+        )
+    }
+}
+
+/** All migrations from the initial v2 schema to the current v10. */
 val ALL_MIGRATIONS = arrayOf(
     MIGRATION_2_3,
     MIGRATION_3_4,
@@ -169,5 +185,6 @@ val ALL_MIGRATIONS = arrayOf(
     MIGRATION_5_6,
     MIGRATION_6_7,
     MIGRATION_7_8,
-    MIGRATION_8_9
+    MIGRATION_8_9,
+    MIGRATION_9_10
 )

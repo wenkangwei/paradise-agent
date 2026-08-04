@@ -2,6 +2,7 @@ package com.example.aichat.domain.repository
 
 import com.example.aichat.domain.model.Conversation
 import com.example.aichat.domain.model.Message
+import com.example.aichat.domain.model.MessageInteractions
 import com.example.aichat.domain.model.MessageMetadata
 import kotlinx.coroutines.flow.Flow
 
@@ -51,6 +52,27 @@ interface ChatRepository {
 
     /** Set or clear AI message feedback: "like" | "dislike" | null. */
     suspend fun setMessageReaction(messageId: String, reaction: String?)
+
+    /**
+     * Record a user interaction on a message (share, retry, TTS playback).
+     * Merges with existing interactions and marks feedback as unsynced.
+     */
+    suspend fun recordInteraction(
+        messageId: String,
+        type: InteractionType,
+        extraData: Map<String, Any> = emptyMap()
+    )
+
+    enum class InteractionType { SHARE, RETRY, TTS_PLAYBACK }
+
+    /** Get all AI messages with unsynced feedback data. */
+    suspend fun getUnsyncedFeedback(): List<Message>
+
+    /** Mark feedback as synced for the given message IDs. */
+    suspend fun markFeedbackSynced(messageIds: List<String>)
+
+    /** Get messages in a conversation since a timestamp (for session incremental upload). */
+    suspend fun getMessagesSince(conversationId: String, sinceTimestamp: Long): List<Message>
 
     /**
      * Mark every message still in STREAMING state as INTERRUPTED, attaching

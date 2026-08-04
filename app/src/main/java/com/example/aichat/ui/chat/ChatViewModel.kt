@@ -69,6 +69,8 @@ class ChatViewModel @Inject constructor(
     private val lastConversationTracker: LastConversationTracker,
     private val voiceConfigRepo: com.example.aichat.data.voice.VoiceConfigRepository,
     private val ttsController: com.example.aichat.data.voice.TtsController,
+    private val dataUploadManager: com.example.aichat.data.repository.DataUploadManager,
+    private val proactiveRepo: com.example.aichat.data.repository.ProactiveRepository,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
@@ -411,6 +413,14 @@ class ChatViewModel @Inject constructor(
                 )
                 withContext(Dispatchers.IO) { repository.appendMessage(userMessage) }
 
+                // Ensure session tracking + timer is started for this conversation
+                dataUploadManager.onSessionEnter(conversationId)
+
+                // Fire-and-forget: best-effort, never block send
+                viewModelScope.launch {
+                    runCatching { proactiveRepo.notifyActivity(conversationId) }
+                }
+
                 // The AI placeholder row is inserted by the :streaming
                 // process's UseCase, which propagates this same id. When
                 // the observer pulls the new row in, the UI updates
@@ -475,6 +485,12 @@ class ChatViewModel @Inject constructor(
      * them informed that A is still in progress.
      */
     fun newChat() {
+        // Data collection: exit previous session if any
+        _uiState.value.currentConversationId?.let { oldConvId ->
+            viewModelScope.launch {
+                runCatching { dataUploadManager.onSessionLeave(oldConvId, "new_chat") }
+            }
+        }
         messagesObserverJob?.cancel()
         // CRITICAL: null out the reference after cancel. Job.cancel() only
         // marks the coroutine as cancelled — the reference itself is still
@@ -511,6 +527,19 @@ class ChatViewModel @Inject constructor(
      * left off).
      */
     fun selectConversation(conversationId: String) {
+        // Data collection: exit previous session, enter new one
+        _uiState.value.currentConversationId?.let { oldConvId ->
+            if (oldConvId != conversationId) {
+                viewModelScope.launch {
+                    runCatching { dataUploadManager.onSessionLeave(oldConvId, "conversation_switch") }
+                }
+            }
+        }
+        dataUploadManager.onSessionEnter(conversationId)
+        // Register for proactive agent messages
+        viewModelScope.launch {
+            runCatching { proactiveRepo.register(conversationId) }
+        }
         messagesObserverJob?.cancel()
         val title = _uiState.value.conversations
             .firstOrNull { it.id == conversationId }?.title
@@ -548,6 +577,7 @@ class ChatViewModel @Inject constructor(
     }
 
     fun setMessageReaction(messageId: String, reaction: String) {
+        android.util.Log.d("ChatVM", "setMessageReaction id=$messageId reaction=$reaction")
         var newValue: String? = null
         _uiState.update { state ->
             val updated = state.messages.map { msg ->
@@ -558,8 +588,21 @@ class ChatViewModel @Inject constructor(
             }
             state.copy(messages = updated)
         }
+        android.util.Log.d("ChatVM", "setMessageReaction newValue=$newValue convId=${_uiState.value.currentConversationId}")
         viewModelScope.launch {
             runCatching { repository.setMessageReaction(messageId, newValue) }
+            // Data collection: queue behavior event (30s debounce)
+            newValue?.let { reactionValue ->
+                _uiState.value.currentConversationId?.let { convId ->
+                    android.util.Log.d("ChatVM", "calling queueBehaviorEvent conv=$convId")
+                    dataUploadManager.queueBehaviorEvent(
+                        messageId = messageId,
+                        sessionId = convId,
+                        eventType = "reaction",
+                        eventData = mapOf("reaction" to reactionValue)
+                    )
+                }
+            }
         }
     }
 
@@ -582,6 +625,22 @@ class ChatViewModel @Inject constructor(
         val failedIdx = messages.indexOfFirst { it.id == failedAiMessageId }
         if (failedIdx < 0) return
         val failedMsg = messages[failedIdx]
+
+        // Data collection: record retry interaction + queue behavior event
+        viewModelScope.launch {
+            runCatching {
+                repository.recordInteraction(
+                    failedAiMessageId,
+                    ChatRepository.InteractionType.RETRY
+                )
+            }
+            dataUploadManager.queueBehaviorEvent(
+                messageId = failedAiMessageId,
+                sessionId = convId,
+                eventType = "retry",
+                eventData = mapOf("original_status" to (failedMsg.status?.name ?: "unknown"))
+            )
+        }
 
         // v4.2.12: 区分两种重试场景
         // - 失败/中断的错误气泡 → 用相同 ID，新流覆盖旧行
@@ -661,6 +720,46 @@ class ChatViewModel @Inject constructor(
             com.example.aichat.data.voice.AndroidTtsProvider(context)
         }
         ttsController.play(messageId, text, provider)
+        // Data collection: record TTS interaction
+        viewModelScope.launch {
+            runCatching {
+                repository.recordInteraction(
+                    messageId,
+                    ChatRepository.InteractionType.TTS_PLAYBACK,
+                    mapOf("duration_ms" to text.length * 80L) // rough estimate
+                )
+            }
+            _uiState.value.currentConversationId?.let { convId ->
+                dataUploadManager.queueBehaviorEvent(
+                    messageId = messageId,
+                    sessionId = convId,
+                    eventType = "tts_playback",
+                    eventData = mapOf("char_count" to text.length)
+                )
+            }
+        }
+    }
+
+    /**
+     * Called when the user shares a message (via MultiShareSheet / ACTION_SEND).
+     * Records the share interaction for training data.
+     */
+    fun onMessageShared(messageId: String) {
+        val convId = _uiState.value.currentConversationId ?: return
+        viewModelScope.launch {
+            runCatching {
+                repository.recordInteraction(
+                    messageId,
+                    ChatRepository.InteractionType.SHARE
+                )
+            }
+            dataUploadManager.queueBehaviorEvent(
+                messageId = messageId,
+                sessionId = convId,
+                eventType = "share",
+                eventData = mapOf("method" to "system_share")
+            )
+        }
     }
 
     fun stopSpeaking() = ttsController.stop()
@@ -677,8 +776,13 @@ class ChatViewModel @Inject constructor(
     }
 
     override fun onCleared() {
-        // Do NOT stop the streaming service here - it runs in the :streaming
-        // process and must survive Activity recreation.
+        // Data collection: flush pending behavior events + exit session
+        _uiState.value.currentConversationId?.let { convId ->
+            viewModelScope.launch {
+                runCatching { dataUploadManager.flushBehaviorEvents() }
+                runCatching { dataUploadManager.onSessionLeave(convId, "viewmodel_cleared") }
+            }
+        }
         super.onCleared()
     }
 

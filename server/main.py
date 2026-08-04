@@ -9,12 +9,14 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
 from api.routes import openai_proxy
+from api.routes import data_upload
+from api.routes import proactive
 
 # ── Agent route ────────────────────────────────────────────────────
 
@@ -115,12 +117,46 @@ async def lifespan(app: FastAPI):
     if AGENT_ENABLED:
         import asyncio
         asyncio.create_task(warmup_agent())
+    # Initialize proactive scheduler
+    _init_proactive()
     yield
     # Shutdown
     from agent_handler import session_manager
     for conv_id in list(session_manager._agents.keys()):
         await session_manager.remove(conv_id)
+    # Stop proactive scheduler
+    from proactive.scheduler import get_scheduler
+    scheduler = get_scheduler()
+    for conv_id in list(scheduler._tasks.keys()):
+        scheduler.unregister(conv_id)
     logger.info("AiChat Agent Server stopped")
+
+
+def _init_proactive():
+    """Initialize proactive scheduler from agent_config.json."""
+    import json
+    from pathlib import Path
+    from proactive.scheduler import init_scheduler
+
+    cfg_path = Path(__file__).parent / "agent_config.json"
+    proactive_cfg = {}
+    if cfg_path.exists():
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            full_cfg = json.load(f)
+        proactive_cfg = full_cfg.get("proactive", {})
+
+    # Environment variables override config
+    import os
+    if os.getenv("PROACTIVE_ENABLED"):
+        proactive_cfg["enabled"] = os.getenv("PROACTIVE_ENABLED", "").lower() in ("1", "true", "yes")
+    if os.getenv("PROACTIVE_INTERVAL_MINUTES"):
+        proactive_cfg["interval_minutes"] = int(os.getenv("PROACTIVE_INTERVAL_MINUTES", "30"))
+
+    scheduler = init_scheduler(proactive_cfg)
+    logger.info(
+        "Proactive scheduler initialized: enabled=%s interval=%dmin",
+        scheduler.enabled, scheduler._interval // 60,
+    )
 
 
 app = FastAPI(
@@ -142,6 +178,29 @@ app.add_middleware(
 app.include_router(openai_proxy.router, prefix="/v1")
 # Agent loop (Phase 2, toggle via agent_config.json)
 app.include_router(agent_router, prefix="/v1")
+# Data collection (feedback, sessions, profiles)
+app.include_router(data_upload.router)
+# Proactive agent messaging
+app.include_router(proactive.router)
+
+
+@app.post("/api/search")
+async def search(request: Request):
+    """Direct web_search tool call — bypass agent, just search."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid JSON"})
+
+    query = body.get("query", "")
+    limit = body.get("limit", 10)
+    sites = body.get("sites", [])
+    if not query:
+        return JSONResponse(status_code=400, content={"error": "query required"})
+
+    from paradise.tools.web_search import _handle_web_search
+    result = await _handle_web_search({"query": query, "limit": limit, "sites": sites})
+    return JSONResponse(content={"query": query, "text": result})
 
 
 @app.get("/api/health")

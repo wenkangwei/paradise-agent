@@ -22,5 +22,16 @@
     "file_mode": "skill_file_parse",
     "temp_dir": "/tmp/aichat_attachments",
     "max_file_size_mb": 10
+  },
+  "proactive": {
+    "enabled": false,
+    "interval_minutes": 30,
+    "cooldown_minutes": 60,
+    "max_context_turns": 10,
+    "model": "qwen2.5:3b"
+  },
+  "feedback": {
+    "enabled": true,
+    "geo_collection": false
   }
 }

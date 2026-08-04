@@ -24,7 +24,8 @@ data class Message(
     val status: MessageStatus = MessageStatus.COMPLETE,
     val reasoningContent: String? = null,
     val metadata: MessageMetadata? = null,
-    val reaction: String? = null
+    val reaction: String? = null,
+    val interactions: MessageInteractions? = null
 )
 
 enum class Role { USER, ASSISTANT, SYSTEM }
@@ -60,4 +61,37 @@ data class MessageMetadata(
         val url: String?,
         val score: Float = 0f
     )
+}
+
+/**
+ * Accumulated interaction metrics for a message, used for training feedback.
+ * Stored as JSON in MessageEntity.interactionsJson.
+ */
+data class MessageInteractions(
+    val shared: Int = 0,
+    val retryCount: Int = 0,
+    val ttsCount: Int = 0,
+    val ttsTotalDurationMs: Long = 0L
+) {
+    fun toJson(): String {
+        return """{"shared":$shared,"retry_count":$retryCount,"tts_count":$ttsCount,"tts_total_duration_ms":$ttsTotalDurationMs}"""
+    }
+
+    companion object {
+        fun fromJson(json: String?): MessageInteractions? {
+            if (json.isNullOrBlank()) return null
+            return try {
+                val regex = Regex("\"(\\w+)\":(\\d+)")
+                val map = regex.findAll(json).associate { it.groupValues[1] to it.groupValues[2].toLong() }
+                MessageInteractions(
+                    shared = (map["shared"] ?: 0).toInt(),
+                    retryCount = (map["retry_count"] ?: 0).toInt(),
+                    ttsCount = (map["tts_count"] ?: 0).toInt(),
+                    ttsTotalDurationMs = map["tts_total_duration_ms"] ?: 0L
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
 }

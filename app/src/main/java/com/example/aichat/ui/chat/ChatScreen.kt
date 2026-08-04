@@ -423,7 +423,10 @@ fun ChatScreen(
                                     )
                                 },
                                 onShareTool = onShareTool,
-                                onShareMessage = { multiShareInitial = setOf(message.id) },
+                                onShareMessage = {
+                                    multiShareInitial = setOf(message.id)
+                                    viewModel.onMessageShared(message.id)
+                                },
                                 onSpeak = { viewModel.speakMessage(message.id, message.content) },
                                 isSpeaking = speakingMessageId == message.id
                             )

@@ -3,11 +3,13 @@ package com.example.aichat.data.repository
 import com.example.aichat.data.local.dao.ConversationDao
 import com.example.aichat.data.local.dao.MessageDao
 import com.example.aichat.data.local.entity.ConversationEntity
+import com.example.aichat.data.local.entity.MessageEntity
 import com.example.aichat.data.local.mapper.toDomain
 import com.example.aichat.data.local.mapper.toEntity
 import com.example.aichat.di.IoDispatcher
 import com.example.aichat.domain.model.Conversation
 import com.example.aichat.domain.model.Message
+import com.example.aichat.domain.model.MessageInteractions
 import com.example.aichat.domain.model.MessageMetadata
 import com.example.aichat.domain.repository.ChatRepository
 import com.google.gson.Gson
@@ -122,7 +124,45 @@ class ChatRepositoryImpl @Inject constructor(
     override suspend fun setMessageReaction(messageId: String, reaction: String?) =
         withContext(ioDispatcher) {
             messageDao.updateReaction(messageId, reaction)
+            messageDao.updateFeedbackSynced(messageId, 0)
         }
+
+    override suspend fun recordInteraction(
+        messageId: String,
+        type: ChatRepository.InteractionType,
+        extraData: Map<String, Any>
+    ) = withContext(ioDispatcher) {
+        val entity = messageDao.getById(messageId) ?: return@withContext
+        val current = MessageInteractions.fromJson(entity.interactionsJson) ?: MessageInteractions()
+        val updated = when (type) {
+            ChatRepository.InteractionType.SHARE -> current.copy(shared = current.shared + 1)
+            ChatRepository.InteractionType.RETRY -> current.copy(retryCount = current.retryCount + 1)
+            ChatRepository.InteractionType.TTS_PLAYBACK -> {
+                val duration = (extraData["duration_ms"] as? Number)?.toLong() ?: 0L
+                current.copy(
+                    ttsCount = current.ttsCount + 1,
+                    ttsTotalDurationMs = current.ttsTotalDurationMs + duration
+                )
+            }
+        }
+        messageDao.updateInteractions(messageId, updated.toJson())
+        messageDao.updateFeedbackSynced(messageId, 0)
+    }
+
+    override suspend fun getUnsyncedFeedback(): List<Message> = withContext(ioDispatcher) {
+        messageDao.getUnsyncedFeedback().map { it.toDomain() }
+    }
+
+    override suspend fun markFeedbackSynced(messageIds: List<String>) = withContext(ioDispatcher) {
+        messageIds.forEach { messageDao.updateFeedbackSynced(it, 1) }
+    }
+
+    override suspend fun getMessagesSince(
+        conversationId: String,
+        sinceTimestamp: Long
+    ): List<Message> = withContext(ioDispatcher) {
+        messageDao.getMessagesSince(conversationId, sinceTimestamp).map { it.toDomain() }
+    }
 
     override suspend fun markDanglingStreamingInterrupted(reason: String) =
         withContext(ioDispatcher) {
