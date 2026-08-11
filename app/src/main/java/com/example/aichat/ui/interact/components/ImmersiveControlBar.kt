@@ -12,15 +12,19 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.StopCircle
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -60,12 +64,14 @@ fun ImmersiveControlBar(
     phase: Phase,
     immersive: Boolean,
     historyExpanded: Boolean,
-    latestPreview: String?,
+    unreadCount: Int,
+    autoPlayTts: Boolean,
     onWake: () -> Unit,
     onToggleHistory: () -> Unit,
     onPushToTalkStart: () -> Unit,
     onPushToTalkEnd: () -> Unit,
     onInterrupt: () -> Unit,
+    onToggleTts: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -104,7 +110,7 @@ fun ImmersiveControlBar(
             // 💬 / ✕
             BubbleToggleButton(
                 expanded = historyExpanded,
-                latestPreview = latestPreview,
+                unreadCount = unreadCount,
                 enabled = !immersive,
                 onClick = { onWake(); onToggleHistory() },
             )
@@ -123,6 +129,13 @@ fun ImmersiveControlBar(
             InterruptButton(
                 enabled = !immersive && phase.isBusy,
                 onClick = { onWake(); onInterrupt() },
+            )
+
+            // 🔊/🔇 自动语音播报开关
+            TtsToggleButton(
+                isOn = autoPlayTts,
+                enabled = !immersive,
+                onClick = { onWake(); onToggleTts() },
             )
 
             // ⚙
@@ -164,27 +177,38 @@ private fun BarSlot(
 @Composable
 private fun BubbleToggleButton(
     expanded: Boolean,
-    latestPreview: String?,
+    unreadCount: Int,
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
     BarSlot(enabled = enabled, onClick = onClick) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(contentAlignment = Alignment.Center) {
             Icon(
                 imageVector = if (expanded) Icons.Filled.Close else Icons.Filled.Forum,
-                contentDescription = if (expanded) "收起对话历史" else "展开对话历史",
+                contentDescription = if (expanded) "收起对话历史"
+                                     else if (unreadCount > 0) "展开对话历史（$unreadCount 条未读）"
+                                     else "展开对话历史",
                 tint = Color.White,
                 modifier = Modifier.size(22.dp),
             )
-            if (!expanded && !latestPreview.isNullOrBlank()) {
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = latestPreview.take(10),
-                    color = Color.White.copy(alpha = 0.75f),
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    fontWeight = FontWeight.Medium,
-                )
+            // Red unread badge — only when collapsed and there are unseen AI replies.
+            if (!expanded && unreadCount > 0) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(x = 8.dp, y = (-8).dp)
+                        .background(Color(0xFFEF5350), shape = CircleShape)
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (unreadCount > 9) "9+" else unreadCount.toString(),
+                        color = Color.White,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                    )
+                }
             }
         }
     }
@@ -268,6 +292,22 @@ private fun SettingsButton(
             imageVector = Icons.Filled.MoreHoriz,
             contentDescription = "更多",
             tint = Color.White.copy(alpha = if (enabled) 0.85f else 0.35f),
+            modifier = Modifier.size(22.dp),
+        )
+    }
+}
+
+@Composable
+private fun TtsToggleButton(
+    isOn: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    BarSlot(enabled = enabled, onClick = onClick) {
+        Icon(
+            imageVector = if (isOn) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+            contentDescription = if (isOn) "关闭语音播报" else "开启语音播报",
+            tint = if (isOn) Color(0xFF81C784) else Color.White.copy(alpha = 0.4f),
             modifier = Modifier.size(22.dp),
         )
     }

@@ -28,4 +28,34 @@ data class VoiceConfig(
 ) {
     val hasStt: Boolean get() = sttUrl.isNotBlank()
     val hasTts: Boolean get() = ttsUrl.isNotBlank()
+
+    /**
+     * Effective TTS endpoint: explicitly configured ttsUrl, or derived from
+     * sttUrl's server (same host:port, path /v1/audio/speech). This lets TTS
+     * "just work" when the user has configured STT but hasn't bothered to set
+     * a separate TTS URL — the companion server exposes both endpoints.
+     */
+    val resolvedTtsUrl: String
+        get() {
+            if (ttsUrl.isNotBlank()) return ttsUrl
+            if (sttUrl.isBlank()) return ""
+            val schemeEnd = sttUrl.indexOf("://")
+            if (schemeEnd < 0) return ""
+            val scheme = sttUrl.substring(0, schemeEnd)
+            val afterScheme = sttUrl.substring(schemeEnd + 3)
+            val pathStart = afterScheme.indexOf("/")
+            val hostPort = if (pathStart > 0) afterScheme.substring(0, pathStart) else afterScheme
+            return "$scheme://$hostPort/v1/audio/speech"
+        }
+
+    /**
+     * Voice to pass to edge-tts. The config default "alloy" is an OpenAI voice
+     * name that edge-tts doesn't recognise — fall back to a Chinese female voice.
+     */
+    val resolvedTtsVoice: String
+        get() = when {
+            ttsVoice.isBlank() -> "zh-CN-XiaoxiaoNeural"
+            ttsVoice == "alloy" -> "zh-CN-XiaoxiaoNeural"
+            else -> ttsVoice
+        }
 }

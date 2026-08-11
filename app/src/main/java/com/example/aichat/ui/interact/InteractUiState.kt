@@ -17,6 +17,8 @@ data class InteractUiState(
     val streamingAiText: String = "",
     /** Last error message surfaced via toast/snackbar; null = none. */
     val errorMessage: String? = null,
+    /** When true, AI replies are spoken via TTS automatically. */
+    val autoPlayTts: Boolean = true,
 )
 
 enum class Phase {

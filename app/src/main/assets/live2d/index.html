@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Live2D</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100vw; height: 100vh; overflow: hidden;
+      background: transparent;
+    }
+    #canvas {
+      position: fixed; top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      display: block;
+    }
+    #status {
+      position: fixed; top: 10px; left: 8px;
+      font-family: monospace; font-size: 12px;
+      color: #ffcc00; background: rgba(0,0,0,0.85);
+      padding: 6px 10px; border-radius: 4px;
+      pointer-events: none; max-width: 95%;
+      white-space: pre-wrap; z-index: 200;
+      display: none;
+    }
+  </style>
+
+  <!-- Live2D Cubism Core (moc3 runtime) -->
+  <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+  <!-- pixi.js v6 (required by pixi-live2d-display v0.4) -->
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+  <!-- pixi-live2d-display (cubism4 bundle — only needs cubism4 core) -->
+  <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="status"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const loadingEl = document.getElementById('loading');
+    const loadingTextEl = document.getElementById('loading-text');
+
+    // Bridge to Kotlin — JS calls these, Kotlin updates Compose loading overlay
+    function notifyLoading(msg) {
+      console.log('[L2D] loading: ' + msg);
+      if (window.AndroidBridge) AndroidBridge.onLoading(msg);
+    }
+    function notifyReady() {
+      console.log('[L2D] ready');
+      if (window.AndroidBridge) AndroidBridge.onReady();
+    }
+    function notifyError(msg) {
+      console.error('[L2D] error: ' + msg);
+      if (window.AndroidBridge) AndroidBridge.onError(msg);
+      else { statusEl.style.display = 'block'; statusEl.textContent = msg; }
+    }
+
+    // Live2D motion control (called from Kotlin via evaluateJavascript)
+    let model = null;
+    let app = null;
+
+    async function init() {
+      try {
+        console.log('[L2D] init start');
+        notifyLoading('正在初始化…');
+
+        // Defensive: check all required globals before proceeding
+        if (typeof PIXI === 'undefined') {
+          notifyError('PIXI 加载失败 (CDN blocked?)'); return;
+        }
+        if (typeof Live2DCubismCore === 'undefined') {
+          notifyError('Live2D Core 加载失败 (CDN blocked?)'); return;
+        }
+        if (!PIXI.live2d || !PIXI.live2d.Live2DModel) {
+          notifyError('pixi-live2d-display 加载失败'); return;
+        }
+
+        notifyLoading('启动渲染引擎…');
+        // resolution=1 is CRITICAL: keeps canvas buffer at CSS-pixel size
+        app = new PIXI.Application({
+          view: document.getElementById('canvas'),
+          autoStart: true,
+          backgroundAlpha: 0,
+          resolution: 1,
+          autoDensity: true,
+          antialias: false,
+          powerPreference: 'high-performance',
+        });
+
+        PIXI.live2d.Live2DModel.registerTicker(PIXI.Ticker);
+
+        notifyLoading('加载角色模型…');
+        model = await PIXI.live2d.Live2DModel.from('Hiyori/Hiyori.model3.json');
+        app.stage.addChild(model);
+
+        const vh = window.innerHeight, vw = window.innerWidth;
+        const modelH = model.internalModel.height, modelW = model.internalModel.width;
+        const scale = Math.min(vh / modelH * 0.9, vw / modelW * 0.9);
+        model.scale.set(scale);
+        model.anchor.set(0.5, 0.5);
+        model.x = vw / 2;
+        model.y = vh / 2;
+        console.log('[L2D] READY scale=' + scale);
+
+        notifyReady();
+        playIdle();
+      } catch (e) {
+        notifyError('init err: ' + (e && e.message ? e.message : String(e)));
+      }
+    }
+
+    function playIdle() {
+      try {
+        if (model) model.motion('Idle');
+      } catch (e) { console.error('[L2D] playIdle: ' + e); }
+    }
+
+    function startSpeaking() {
+      try {
+        // TapBody motion as a speaking proxy (MVP: no lip-sync)
+        if (model) model.motion('TapBody');
+      } catch (e) { console.error('[L2D] startSpeaking: ' + e); }
+    }
+
+    function stopSpeaking() {
+      try {
+        if (model) model.motion('Idle');
+      } catch (e) { console.error('[L2D] stopSpeaking: ' + e); }
+    }
+
+    window.addEventListener('load', init);
+  </script>
+</body>
+</html>

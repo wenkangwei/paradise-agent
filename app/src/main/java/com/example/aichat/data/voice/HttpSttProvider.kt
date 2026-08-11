@@ -82,10 +82,17 @@ class HttpSttProvider(
             .post(builder.build())
             .build()
 
-        return runCatching {
+        return try {
             client.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) return@use ""
+                android.util.Log.d("HttpSttProvider",
+                    "resp code=${resp.code} msg=${resp.message} url=$sttUrl")
+                if (!resp.isSuccessful) {
+                    val errBody = runCatching { resp.body?.string().orEmpty() }.getOrDefault("")
+                    android.util.Log.d("HttpSttProvider", "error body: ${errBody.take(300)}")
+                    return@use ""
+                }
                 val body = resp.body?.string().orEmpty()
+                android.util.Log.d("HttpSttProvider", "body len=${body.length} preview=${body.take(200)}")
                 // OpenAI Whisper always returns JSON with a "text" field when
                 // response_format=json. Some self-hosted variants ignore the
                 // requested format and return plain text — handle both.
@@ -93,7 +100,12 @@ class HttpSttProvider(
                     JSONObject(body).optString("text", "")
                 }.getOrElse { body.trim() }
             }
-        }.getOrElse { "" }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.e("HttpSttProvider", "transcribe FAILED", e)
+            ""
+        }
     }
 
     /** Map a few common audio extensions to MIME types OkHttp will accept. */

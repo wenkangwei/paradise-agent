@@ -77,6 +77,11 @@ class InteractViewModel @Inject constructor(
         }
     }
 
+    /** Toggle the auto-TTS-broadcast flag. Persists in-memory for this session. */
+    fun toggleAutoPlayTts() {
+        _ui.update { it.copy(autoPlayTts = !it.autoPlayTts) }
+    }
+
     /** Abort the current pipeline. Idempotent — safe to call from any phase. */
     fun onInterrupt() {
         activeJob?.cancel()
@@ -98,10 +103,16 @@ class InteractViewModel @Inject constructor(
             // 1. STT
             _ui.update { it.copy(phase = Phase.Transcribing) }
             val cfg = voiceConfigRepo.config.value
+            android.util.Log.d("InteractVM", "STT cfg: sttUrl='${cfg.sttUrl}' sttModel='${cfg.sttModel}' wav=${wavFile.length()}B")
             val userText = if (cfg.sttUrl.isNotBlank()) {
                 val stt = HttpSttProvider(cfg.sttUrl, cfg.sttApiKey.ifBlank { null }, cfg.sttModel)
-                withTimeoutOrNull(60_000) { stt.transcribe(wavFile, "zh") }.orEmpty().trim()
+                val raw = withTimeoutOrNull(60_000) {
+                    withContext(io) { stt.transcribe(wavFile, "zh") }
+                }
+                android.util.Log.d("InteractVM", "STT raw='$raw'")
+                raw.orEmpty().trim()
             } else {
+                android.util.Log.d("InteractVM", "STT skipped: sttUrl blank")
                 ""
             }
             // Best-effort cleanup of the wav file
@@ -140,7 +151,7 @@ class InteractViewModel @Inject constructor(
             }
 
             // 5. TTS playback (blocking until completion or cancel)
-            if (aiText.isNotBlank()) {
+            if (aiText.isNotBlank() && _ui.value.autoPlayTts) {
                 playTtsBlocking(aiText)
             }
 
@@ -182,13 +193,13 @@ class InteractViewModel @Inject constructor(
      */
     private suspend fun playTtsBlocking(text: String) {
         val cfg = voiceConfigRepo.config.value
-        if (cfg.ttsUrl.isBlank()) {
-            // No TTS configured — skip playback but don't fail the pipeline.
+        val ttsUrl = cfg.resolvedTtsUrl
+        if (ttsUrl.isBlank()) {
             return
         }
         val bytes = try {
-            val tts = HttpTtsProvider(cfg.ttsUrl, cfg.ttsApiKey.ifBlank { null })
-            withContext(io) { tts.synthesize(text, cfg.ttsVoice.ifBlank { "zh-CN-XiaoxiaoNeural" }, cfg.ttsModel) }
+            val tts = HttpTtsProvider(ttsUrl, cfg.ttsApiKey.ifBlank { null })
+            withContext(io) { tts.synthesize(text, cfg.resolvedTtsVoice, cfg.ttsModel) }
         } catch (_: Exception) {
             return
         }
