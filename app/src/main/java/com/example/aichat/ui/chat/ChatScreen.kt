@@ -5,6 +5,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +21,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -69,6 +72,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.aichat.data.repository.ApiProfile
 import com.example.aichat.ui.chat.toolcard.FavoriteToolDialog
+import com.example.aichat.ui.interact.InteractScreen
 import com.example.aichat.ui.chat.toolcard.ToolCardFullScreen
 import com.example.aichat.ui.chat.toolcard.ToolSharer
 import com.example.aichat.ui.chat.toolcard.ToolType
@@ -80,7 +84,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(
     onNavigateToSettings: () -> Unit = {},
@@ -312,7 +316,10 @@ fun ChatScreen(
             )
         }
     ) {
-        Scaffold(
+        val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
+        HorizontalPager(state = pagerState) { page ->
+            if (page == 0) {
+                Scaffold(
             topBar = {
                 TopAppBar(
                     title = {
@@ -553,6 +560,11 @@ fun ChatScreen(
                     )
                 }
             }
+        }
+        } else {
+            // Page 1: Live2D interact tab. Standalone — no TopBar/drawer/Snackbar.
+            InteractScreen(onOpenSettings = onNavigateToSettings)
+        }
         }
     }
 }

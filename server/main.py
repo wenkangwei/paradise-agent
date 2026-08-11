@@ -17,6 +17,8 @@ from contextlib import asynccontextmanager
 from api.routes import openai_proxy
 from api.routes import data_upload
 from api.routes import proactive
+from api.routes.tts import simple_router as tts_simple_router
+from api.routes.tts import openai_router as tts_openai_router
 
 # ── Agent route ────────────────────────────────────────────────────
 
@@ -182,6 +184,9 @@ app.include_router(agent_router, prefix="/v1")
 app.include_router(data_upload.router)
 # Proactive agent messaging
 app.include_router(proactive.router)
+# TTS (edge-tts): simple endpoint + OpenAI-compatible /v1/audio/speech
+app.include_router(tts_simple_router)
+app.include_router(tts_openai_router)
 
 
 @app.post("/api/search")
