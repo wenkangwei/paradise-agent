@@ -1,0 +1,110 @@
+# Paradise Agent — single-server production stack
+# Run on `prod` branch only.
+# Usage:
+#   docker compose up -d
+#   docker compose ps
+#   docker compose logs -f api
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile.prod
+    image: paradise-agent:prod
+    container_name: paradise-api
+    ports:
+      - "8000:8000"
+    environment:
+      PARADISE_MODE: prod
+      PARADISE_CONFIG: /app/server/paradise/config.prod.yaml
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      POSTGRES_DSN: postgresql://paradise:paradise@postgres:5432/paradise
+      OLLAMA_API_URL: http://host.docker.internal:11434
+      # Back-compat aliases — main-branch code reads these names directly
+      INFER_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # API Keys for ingress auth (Phase 1) — rotate via .env
+      PARADISE_API_KEYS: ${PARADISE_API_KEYS:-dev-key-please-rotate}
+    volumes:
+      - ./server/paradise/config.prod.yaml:/app/server/paradise/config.prod.yaml:ro
+      - paradise_logs:/app/server/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  redis:
+    image: redis:7-alpine
+    container_name: paradise-redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: paradise-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: paradise-postgres
+    environment:
+      POSTGRES_USER: paradise
+      POSTGRES_PASSWORD: paradise
+      POSTGRES_DB: paradise
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paradise -d paradise"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # OTel collector — local trace/metric pipeline (Phase 6 populates instrumentation)
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: paradise-otel
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./server/paradise/observability/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+      - otel_data:/var/lib/otelcol
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics scrape target
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  qdrant_data:
+  postgres_data:
+  paradise_logs:
+  otel_data:

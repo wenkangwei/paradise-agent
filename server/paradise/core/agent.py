@@ -183,6 +183,52 @@ class ParadiseAgent:
         if self.config.reflection.enabled:
             asyncio.create_task(self._reflection_phase(ctx))
 
+    # ── LangGraph path (Phase 2, prod-only) ──────────────────────
+    # Pure addition — does NOT replace handle_message. Activated only when
+    # ParadiseConfig.langgraph_enabled is True (set in config.prod.yaml).
+    # Main branch code paths are untouched.
+
+    async def run_via_graph(
+        self,
+        ctx: LoopContext,
+        checkpointer=None,
+    ) -> AsyncGenerator[dict, None]:
+        """Run the 4-phase loop via LangGraph StateGraph.
+
+        Functionally equivalent to handle_message() but with:
+          - Per-thread state checkpointing (resumable across restarts)
+          - Explicit graph topology (extensible to multi-agent)
+          - Streamable node updates
+
+        Yields the same event dict shape as handle_message() so callers
+        (agent_handler._feed_events) can use either path interchangeably.
+        """
+        # Lazy import — avoids hard dep on langgraph for dev/main branch
+        from paradise.core.graph import build_agent_graph, stream_graph_events
+
+        self._last_interaction_time = time.monotonic()
+        self.emotion_engine.on_interaction(self.emotion_state, is_positive=True)
+        self.workspace.save_state(self.emotion_state.to_dict())
+
+        # Reuse build_agent_graph each call (small overhead; compiled graph
+        # captures `self` so it can't be cached across agents).
+        compiled = build_agent_graph(self, checkpointer=checkpointer)
+
+        initial_state: dict = {
+            "user_message": ctx.user_message,
+            "agent_id": self.agent_id,
+            "session_id": ctx.session_id,
+            "enable_tools": ctx.enable_tools,
+            "tool_results": "",
+            "thinking_text": "",
+            "response_text": "",
+            "events": [],
+        }
+        thread_id = f"{self.agent_id}:{ctx.session_id or 'default'}"
+
+        async for event in stream_graph_events(compiled, initial_state, thread_id):
+            yield event
+
     # ── Phase 1: TOOL ────────────────────────────────────────────
 
     async def _tool_phase(self, ctx: LoopContext):

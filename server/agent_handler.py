@@ -419,7 +419,15 @@ async def process_message_stream(
         async def _feed_events():
             """Pull events from agent and put them in the queue."""
             try:
-                async for evt in agent.handle_message(ctx):
+                # Phase 2: prod branch can route through LangGraph when enabled.
+                # Dev/main branch path (handle_message) is the default.
+                _use_graph = os.getenv("PARADISE_MODE", "dev") == "prod" and \
+                    getattr(agent.config, "langgraph_enabled", False)
+                if _use_graph:
+                    agent_method = agent.run_via_graph
+                else:
+                    agent_method = agent.handle_message
+                async for evt in agent_method(ctx):
                     await event_queue.put(evt)
                 await event_queue.put(None)  # Sentinel: stream complete
             except Exception as exc:

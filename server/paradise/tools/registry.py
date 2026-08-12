@@ -81,11 +81,12 @@ class ToolEntry:
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars",
+        "privilege",  # Phase 4: "read" | "write" | "admin" — default "read"
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None):
+                 max_result_size_chars=None, privilege="read"):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -96,6 +97,9 @@ class ToolEntry:
         self.description = description
         self.emoji = emoji
         self.max_result_size_chars = max_result_size_chars
+        # Phase 4: privilege ring — defaults to "read" (safe). Tools that
+        # mutate state (write) or escalate (admin) must opt in explicitly.
+        self.privilege = privilege
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +215,7 @@ class ToolRegistry:
         description: str = "",
         emoji: str = "",
         max_result_size_chars: int | float | None = None,
+        privilege: str = "read",  # Phase 4: "read" | "write" | "admin"
     ):
         """Register a tool.  Called at module-import time by each tool file."""
         with self._lock:
@@ -236,6 +241,7 @@ class ToolRegistry:
                 description=description or schema.get("description", ""),
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
+                privilege=privilege,
             )
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn

@@ -1,0 +1,60 @@
+# Paradise Agent — production config overlay.
+# Loaded only when PARADISE_MODE=prod (see server/paradise/factory.py).
+# Dev mode (main branch) reads nothing from this file.
+
+mode: prod
+
+# Set false to keep main-branch 4-phase loop; true routes through LangGraph (Phase 2)
+langgraph_enabled: false
+
+# LLM (override per-deployment via env var)
+llm:
+  provider: ollama
+  model: qwen2.5:7b
+  api_url: http://ollama:11434
+  temperature: 0.7
+  max_tokens: 2048
+
+tool_llm:
+  provider: ollama
+  model: qwen2.5:3b
+  api_url: http://ollama:11434
+  temperature: 0.3
+  max_tokens: 1024
+
+# Ingress (Phase 1)
+ingress:
+  api_keys:
+    - "${PARADISE_API_KEYS}"
+  rate_limit_per_minute: 60
+  cost_budget_per_request_usd: 0.05
+
+# Transport resilience (Phase 3)
+resilience:
+  max_retries: 3
+  retry_backoff_max_seconds: 10
+  circuit_failure_threshold: 3
+  circuit_recovery_seconds: 30
+
+# Sandbox privilege rings (Phase 4)
+sandbox:
+  admin_tools_enabled: false  # admin tools rejected by default
+  subprocess_timeout_seconds: 30
+  subprocess_memory_limit_mb: 256
+
+# Memory stack (Phase 5)
+memory:
+  redis_url: "${REDIS_URL}"
+  qdrant_url: "${QDRANT_URL}"
+  session_ttl_seconds: 1800
+  similarity_threshold: 0.92
+
+# Postgres for LangGraph checkpointer (Phase 2)
+checkpointer:
+  backend: postgres  # postgres | sqlite
+  postgres_dsn: "${POSTGRES_DSN}"
+
+# Observability (Phase 6)
+observability:
+  otlp_endpoint: http://otel-collector:4317
+  log_level: INFO

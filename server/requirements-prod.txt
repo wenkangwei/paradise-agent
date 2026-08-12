@@ -1,0 +1,38 @@
+# Paradise Agent — production-only dependencies.
+# These extend server/requirements.txt (which stays minimal for dev mode).
+# Installed only by Dockerfile.prod; main branch never imports any of these.
+
+# ── LangGraph orchestration (Phase 2) ─────────────────────────────
+langgraph>=0.2.0
+langgraph-checkpoint-postgres>=2.0.0
+langgraph-checkpoint-sqlite>=2.0.0
+
+# ── Transport resilience (Phase 3) ────────────────────────────────
+tenacity>=8.2.0
+circuitbreaker>=2.0.0
+
+# ── Memory stack (Phase 5) ────────────────────────────────────────
+redis>=5.0.0
+qdrant-client>=1.12.0
+sentence-transformers>=3.0.0   # for BAAI/bge-m3 semantic embeddings
+
+# ── Ingress middleware (Phase 1) ──────────────────────────────────
+slowapi>=0.1.9
+
+# ── Observability (Phase 6) ───────────────────────────────────────
+opentelemetry-sdk>=1.27.0
+opentelemetry-exporter-otlp>=1.27.0
+opentelemetry-instrumentation-fastapi>=0.48b0
+prometheus-fastapi-instrumentator>=7.0.0
+structlog>=24.1.0
+
+# ── YAML config loader ───────────────────────────────────────────
+pyyaml>=6.0
+
+# ── Runtime deps required by FastAPI routes (Phase 1 STT upload) ──
+python-multipart>=0.0.9
+
+# ── Voice (TTS + STT) — routes ported from feat/live2d-interact-tab ──
+edge-tts>=6.1.0          # Microsoft online TTS, zero-cost, no API key
+faster-whisper>=1.0.0    # CTranslate2-backed Whisper for STT
+

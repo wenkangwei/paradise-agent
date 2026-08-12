@@ -1,0 +1,35 @@
+# Paradise Agent — Production image
+# Built only on `prod` branch; main branch never uses this.
+FROM python:3.11-slim
+
+# System deps for sandbox subprocess isolation (Phase 4) + building wheels
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install deps (prod extends base requirements.txt)
+COPY server/requirements.txt /app/server/requirements.txt
+COPY server/requirements-prod.txt /app/server/requirements-prod.txt
+RUN pip install --no-cache-dir -r /app/server/requirements.txt \
+                                 -r /app/server/requirements-prod.txt
+
+# Copy server code (paradise/ + main.py + agent_handler.py + api/)
+COPY server/ /app/server/
+
+WORKDIR /app/server
+
+# Default config — override via PARADISE_CONFIG env var or volume mount
+ENV PARADISE_MODE=prod \
+    PARADISE_CONFIG=/app/server/paradise/config.prod.yaml \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -fsS http://localhost:8000/api/health || exit 1
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

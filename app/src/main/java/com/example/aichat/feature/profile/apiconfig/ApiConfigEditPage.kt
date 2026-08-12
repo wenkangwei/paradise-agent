@@ -154,13 +154,18 @@ fun ApiConfigEditPage(
             }
 
             // API Key with history dropdown (masked)
+            // NOTE: keyboardType = Ascii (NOT Password). Material3's
+            // ExposedDropdownMenuBox + Password keyboard + PasswordVisualTransformation
+            // triggers an IME re-attach crash loop on Gboard / CJK IMEs
+            // (issuetracker.google.com/issues/224014146). Mask visual is preserved
+            // via PasswordVisualTransformation below; only the keyboard flavour differs.
             HistoryTextField(
                 value = state.apiKey,
                 onValueChange = viewModel::updateApiKey,
                 label = "API Key",
                 placeholder = if (state.isNew) "粘贴你的 API Key" else "留空则保留原 Key",
                 history = state.apiKeyHistory,
-                keyboardType = KeyboardType.Password,
+                keyboardType = KeyboardType.Ascii,
                 mask = true
             )
 

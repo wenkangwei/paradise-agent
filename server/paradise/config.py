@@ -73,6 +73,14 @@ class PluginConfig:
 class ParadiseConfig:
     """Paradise Agent 完整配置."""
     agent_id: str = ""
+    # Deployment mode — "dev" (main branch, default) or "prod" (prod branch).
+    # Added in Phase 0; defaults to dev so main-branch code is unaffected.
+    # When mode == "prod", server/main.py & agent_handler.py route through
+    # prod-only components (LangGraph, ResilientTransport, Redis memory).
+    mode: str = "dev"
+    # Phase 2: when True, agent_handler routes through LangGraph StateGraph
+    # instead of handle_message's inline loop. Defaults False so main is unaffected.
+    langgraph_enabled: bool = False
     # LLM
     llm: LLMConfig = field(default_factory=LLMConfig)
     # 工具阶段用低温度
@@ -119,6 +127,8 @@ class ParadiseConfig:
         config.enable_tools = data.get("enable_tools", True)
         config.max_tool_rounds = data.get("max_tool_rounds", 5)
         config.max_history = data.get("max_history", 20)
+        # Phase 2: langgraph_enabled (defaults False, only True in prod)
+        config.langgraph_enabled = data.get("langgraph_enabled", False)
         return config
 
     def to_dict(self) -> dict[str, Any]:
