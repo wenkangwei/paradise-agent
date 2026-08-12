@@ -66,14 +66,61 @@ All prod config lives in `server/paradise/config.prod.yaml`. Override via env va
 | `PARADISE_ENABLE_ADMIN_TOOLS` | unset | Set `1` to allow admin-privilege tools |
 | `OLLAMA_API_URL` | `http://host.docker.internal:11434` | LLM backend (uses host Ollama) |
 
-## Sync workflow (main → prod)
+## Branch workflow (dev → prod)
+
+```
+main      ← original dev / prototype branch (kept for historical reasons)
+dev       ← active development branch (cut from prod; all new work lands here)
+prod      ← protected release branch (only accepts PR merge from dev)
+```
+
+**Iron rule: nothing lands on `prod` without first landing on `dev` and passing
+the smoke suite.** `prod` should always be deployable as-is.
+
+```bash
+# 1. Day-to-day work on dev
+git checkout dev
+# ... edit, commit, push ...
+git push origin dev
+
+# 2. Validate before promotion
+docker compose up -d --build
+./scripts/smoke_prod.sh                                   # expect 5/7+ PASS
+docker compose exec api PARADISE_MODE=dev pytest server/paradise/tests/  # 59/59 PASS
+
+# 3. Promote to prod via PR (GitHub UI protects prod from direct push)
+gh pr create --base prod --head dev --title "release: <summary>"
+# Review, CI green, merge → prod is now at the new commit
+
+# 4. Sync main if needed (rare; only when main's dev-mode path needs an update)
+git checkout main
+git merge dev --no-ff
+# Conflicts only in flag blocks — keep dev's side
+```
+
+### GitHub-side protection (one-time setup)
+
+On GitHub → Settings → Branches → Add rule for `prod`:
+- ✅ Require a pull request before merging (1 approval)
+- ✅ Require status checks to pass (select `smoke_prod` once CI is wired)
+- ✅ Require branches to be up to date before merging
+- ❌ Do NOT allow force pushes
+- ❌ Do NOT allow deletions
+
+After this, direct `git push origin prod` will be rejected by GitHub.
+```
+
+## Legacy sync workflow (main → prod)
+
+The original single-branch model (commit on main, merge into prod) still works
+for historical context, but new work should use the **dev → prod** flow above.
 
 ```bash
 # Bugfix on main
 git checkout main
 # ... edit, commit ...
 
-# Sync to prod
+# Sync to prod (now requires PR if prod branch protection is enabled)
 git checkout prod
 git merge main
 # Conflicts expected only in flag blocks — keep prod's side
