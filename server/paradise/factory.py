@@ -52,12 +52,76 @@ def load_prod_config() -> ParadiseConfig:
 
 # ── Phase 2/3/5 hooks (stubs, populated in later phases) ──────────
 
+def build_intent_classifier(config: ParadiseConfig):  # noqa: ANN201
+    """Phase 2.5: build the intent cascade.
+
+    Strategies are added in order. Each strategy is responsible for its own
+    availability check — unavailable backends (Qdrant down, ollama missing)
+    silently return None at classify-time, so wiring them here is safe.
+
+    Construction never raises. If the intent module itself fails to import
+    (e.g., in dev without prod deps), returns None and the graph runs in
+    legacy 4-phase shape.
+    """
+    try:
+        from paradise.core.intent import (
+            IntentClassifier, ClassifierConfig,
+            RuleStrategy, EmbeddingStrategy, LLMStrategy, CppStrategy,
+        )
+    except ImportError as exc:
+        # Dev mode without intent module deps — graceful degradation.
+        return None
+
+    strategies = [RuleStrategy()]
+
+    # L2 — embedding cache. Only wire if qdrant_provider is constructed
+    # (Phase 5). For now we attempt a lazy import; if no provider is
+    # available, skip the tier.
+    try:
+        from paradise.memory.qdrant_provider import QdrantSemanticProvider
+        qdrant_url = (getattr(config, "prod_raw", None) or {}).get(
+            "memory", {}
+        ).get("qdrant_url", os.environ.get("QDRANT_URL", "http://localhost:6333"))
+        embedder = EmbeddingStrategy(
+            qdrant_provider=QdrantSemanticProvider(url=qdrant_url),
+        )
+        strategies.append(embedder)
+    except Exception:
+        # Embedding tier optional — silent skip.
+        pass
+
+    # L3 — small LLM. Reads ollama URL from env (same var used by transports).
+    ollama_url = os.environ.get(
+        "OLLAMA_BASE_URL",
+        os.environ.get("OLLAMA_API_URL", "http://localhost:11434"),
+    )
+    strategies.append(LLMStrategy(base_url=ollama_url))
+
+    # L4 — C++ kernel stub. Wired unconditionally; inert until .so lands.
+    strategies.append(CppStrategy())
+
+    return IntentClassifier(
+        strategies=strategies,
+        config=ClassifierConfig(),
+    )
+
+
 def build_graph(config: ParadiseConfig, agent=None, checkpointer=None):  # noqa: ANN201
-    """Phase 2: return compiled LangGraph StateGraph."""
+    """Phase 2: return compiled LangGraph StateGraph.
+
+    The graph is intent-aware when build_intent_classifier() returns a
+    non-None classifier; otherwise it falls back to the linear 4-phase
+    shape (TOOL→THINK→RESPOND→REFLECT).
+    """
     from paradise.core.graph import build_agent_graph
     if agent is None:
         raise ValueError("build_graph requires an agent instance to wrap")
-    return build_agent_graph(agent, checkpointer=checkpointer)
+    classifier = build_intent_classifier(config)
+    return build_agent_graph(
+        agent,
+        checkpointer=checkpointer,
+        intent_classifier=classifier,
+    )
 
 
 def build_transport(config: ParadiseConfig):  # noqa: ANN201

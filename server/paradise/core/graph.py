@@ -5,10 +5,17 @@ ParadiseAgent.run_via_graph(), which itself is only called when
 ParadiseConfig.langgraph_enabled is True. Main-branch code paths
 (handle_message) are untouched.
 
-Graph topology (1:1 with the existing 4-phase loop):
+Graph topology (intent-aware):
     START
       ↓
-    TOOL ──→ THINK ──→ RESPOND ──→ REFLECT ──→ END
+    INTENT ──[route_by_intent]──┬─▶ TOOL ──▶ THINK ──▶ RESPOND ──▶ REFLECT ──▶ END   (default)
+                               ├─▶ RESPOND ──▶ REFLECT ──▶ END                      (chitchat fast path)
+                               └─▶ END                                                (unsafe)
+
+The INTENT node is OPTIONAL. If no intent_classifier is passed to
+build_agent_graph, the graph reverts to the original 4-phase linear shape
+(TOOL→THINK→RESPOND→REFLECT), preserving backward compatibility with
+tests / dev deployments that haven't wired the module yet.
 
 Each node is a thin async wrapper around the corresponding
 ParadiseAgent._xxx_phase() method. State carries LoopContext-equivalent
@@ -18,12 +25,13 @@ Checkpointer: MemorySaver by default (in-process). For cross-restart
 persistence, pass SqliteSaver or PostgresSaver from factory.py.
 
 Phase 2 — LangGraph orchestration replacement.
+Phase 2.5 — intent-aware routing.
 """
 from __future__ import annotations
 
 import logging
 from operator import add
-from typing import Annotated, Any, AsyncGenerator, TypedDict
+from typing import Annotated, Any, AsyncGenerator, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
@@ -40,6 +48,11 @@ class AgentState(TypedDict, total=False):
     agent_id: str
     session_id: str
     enable_tools: bool
+
+    # Intent (set by intent_node, read by route_by_intent / downstream nodes)
+    intent: str
+    intent_confidence: float
+    intent_source: str
 
     # Intermediate accumulators
     tool_results: str
@@ -75,19 +88,67 @@ def _rebuild_ctx(agent, state: dict[str, Any]):
     )
 
 
-def build_agent_graph(agent, checkpointer=None):
+def _route_by_intent(state: AgentState) -> str:
+    """Conditional-edge router.
+
+    Returns the name of the next node to execute after INTENT. Keep this
+    PURE — no logging, no I/O — so LangGraph can replay it deterministically
+    from the checkpointer.
+
+    Routing policy:
+      * CHITCHAT / UNSAFE        → skip to RESPOND (no tools / no think)
+      * everything else          → TOOL (full pipeline; unchanged default)
+    """
+    intent = state.get("intent", "unknown")
+    if intent in ("chitchat", "unsafe"):
+        return "respond"
+    return "tool"
+
+
+def build_agent_graph(
+    agent,
+    checkpointer=None,
+    intent_classifier=None,
+):
     """Compile a LangGraph StateGraph that mirrors handle_message()'s 4 phases.
 
     Args:
         agent: ParadiseAgent instance — its _xxx_phase methods are wrapped as nodes.
         checkpointer: langgraph Checkpointer (MemorySaver default). For prod,
             pass SqliteSaver or PostgresSaver from factory.py.
+        intent_classifier: optional IntentClassifier. When provided, the graph
+            runs an INTENT node first and routes via `route_by_intent`. When
+            None, the graph falls back to the original linear shape
+            (TOOL→THINK→RESPOND→REFLECT), preserving backward compatibility.
 
     Returns:
         Compiled LangGraph runnable. Invoke via:
             graph.astream(initial_state, config={"configurable": {"thread_id": sid}})
     """
     graph = StateGraph(AgentState)
+
+    # ── Node: INTENT (optional, prepends when classifier provided) ──
+    async def intent_node(state: AgentState) -> dict:
+        msg = state.get("user_message", "")
+        if intent_classifier is None or not msg:
+            return {"intent": "unknown", "intent_confidence": 0.0, "intent_source": "none"}
+        try:
+            result = await intent_classifier.classify(msg)
+        except Exception as exc:
+            logger.warning("intent classifier raised (suppressed): %s", exc)
+            return {"intent": "unknown", "intent_confidence": 0.0, "intent_source": "error"}
+        new_events: list[dict] = [{
+            "type": "intent",
+            "content": result.intent.value,
+            "confidence": result.confidence,
+            "source": result.source,
+        }]
+        return {
+            "intent": result.intent.value,
+            "intent_confidence": result.confidence,
+            "intent_source": result.source,
+            "events": new_events,
+        }
 
     # ── Node: TOOL ────────────────────────────────────────────────
     async def tool_node(state: AgentState) -> dict:
@@ -154,14 +215,34 @@ def build_agent_graph(agent, checkpointer=None):
     graph.add_node("respond", respond_node)
     graph.add_node("reflect", reflect_node)
 
-    graph.set_entry_point("tool")
-    graph.add_edge("tool", "think")
-    graph.add_edge("think", "respond")
-    graph.add_edge("respond", "reflect")
-    graph.add_edge("reflect", END)
+    if intent_classifier is not None:
+        # Intent-aware topology: INTENT → [conditional] → {TOOL | RESPOND}
+        graph.add_node("intent", intent_node)
+        graph.set_entry_point("intent")
+        graph.add_conditional_edges(
+            "intent",
+            _route_by_intent,
+            {
+                "tool": "tool",
+                "respond": "respond",
+            },
+        )
+        graph.add_edge("tool", "think")
+        graph.add_edge("think", "respond")
+        graph.add_edge("respond", "reflect")
+        graph.add_edge("reflect", END)
+        topology = "INTENT→{TOOL|RESPOND}→THINK→RESPOND→REFLECT"
+    else:
+        # Legacy topology: straight 4-phase linear.
+        graph.set_entry_point("tool")
+        graph.add_edge("tool", "think")
+        graph.add_edge("think", "respond")
+        graph.add_edge("respond", "reflect")
+        graph.add_edge("reflect", END)
+        topology = "TOOL→THINK→RESPOND→REFLECT"
 
     compiled = graph.compile(checkpointer=checkpointer or MemorySaver())
-    logger.info("Compiled agent graph: TOOL→THINK→RESPOND→REFLECT")
+    logger.info("Compiled agent graph: %s", topology)
     return compiled
 
 
