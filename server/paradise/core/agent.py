@@ -210,9 +210,22 @@ class ParadiseAgent:
         self.emotion_engine.on_interaction(self.emotion_state, is_positive=True)
         self.workspace.save_state(self.emotion_state.to_dict())
 
+        # Build intent classifier once per call. In prod mode, factory wires
+        # rule + embedding + LLM + cpp cascade; in dev mode returns None and
+        # the graph falls back to legacy 4-phase shape (no INTENT node).
+        try:
+            from paradise.factory import build_intent_classifier
+            classifier = build_intent_classifier(self.config)
+        except Exception:
+            classifier = None
+
         # Reuse build_agent_graph each call (small overhead; compiled graph
         # captures `self` so it can't be cached across agents).
-        compiled = build_agent_graph(self, checkpointer=checkpointer)
+        compiled = build_agent_graph(
+            self,
+            checkpointer=checkpointer,
+            intent_classifier=classifier,
+        )
 
         initial_state: dict = {
             "user_message": ctx.user_message,

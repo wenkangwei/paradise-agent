@@ -71,6 +71,26 @@ ATTACHMENTS_ENABLED = os.getenv("ATTACHMENTS_ENABLED", str(_CFG.get("attachments
 ATTACH_IMAGE_MODE = os.getenv("ATTACH_IMAGE_MODE", _CFG.get("attachments", {}).get("image_mode", "base64_passthrough"))
 ATTACH_FILE_MODE = os.getenv("ATTACH_FILE_MODE", _CFG.get("attachments", {}).get("file_mode", "read_tool"))
 
+# ── Phase 2 / 2.5: LangGraph + Intent routing flag ─────────────────
+# In prod mode, inherit langgraph_enabled from config.prod.yaml so the
+# graph (and its INTENT node) actually lights up. In dev/main mode this
+# stays False → original 4-phase handle_message() path is untouched.
+def _resolve_langgraph_enabled() -> bool:
+    if os.getenv("PARADISE_MODE", "dev") != "prod":
+        return False
+    # Env override wins (lets operators toggle without editing yaml).
+    env_val = os.getenv("PARADISE_LANGGRAPH_ENABLED", "")
+    if env_val:
+        return env_val.lower() in ("1", "true", "yes")
+    try:
+        from paradise.factory import load_prod_config
+        return load_prod_config().langgraph_enabled
+    except Exception:
+        return False
+
+LANGGRAPH_ENABLED = _resolve_langgraph_enabled()
+logger.info("LangGraph+intent routing: enabled=%s (mode=%s)", LANGGRAPH_ENABLED, os.getenv("PARADISE_MODE", "dev"))
+
 # ── Session Manager ───────────────────────────────────────────────
 
 class AgentSessionManager:
@@ -104,6 +124,10 @@ class AgentSessionManager:
                 max_tool_rounds=MAX_TOOL_ROUNDS,
                 heartbeat=HeartbeatConfig(enabled=False),
                 reflection=ReflectionConfig(enabled=False),
+                # Phase 2.5: when True, run_via_graph() is used → INTENT node
+                # classifies the message and routes chitchat/unsafe to the
+                # RESPOND fast path. Other intents run the full 4-phase pipeline.
+                langgraph_enabled=LANGGRAPH_ENABLED,
             )
 
             agent = ParadiseAgent(conv_id, config)

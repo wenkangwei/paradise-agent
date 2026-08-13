@@ -5,7 +5,8 @@
 mode: prod
 
 # Set false to keep main-branch 4-phase loop; true routes through LangGraph (Phase 2)
-langgraph_enabled: false
+# Phase 2.5: enables INTENT node + conditional routing (chitchat → RESPOND fast path)
+langgraph_enabled: true
 
 # LLM (override per-deployment via env var)
 llm:
