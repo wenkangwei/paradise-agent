@@ -8,6 +8,11 @@ mode: prod
 # Phase 2.5: enables INTENT node + conditional routing (chitchat → RESPOND fast path)
 langgraph_enabled: true
 
+# Phase 2.9: routes through supervisor graph (intent → mode-select →
+# subgraph via Handoff Protocol → reflect → cleanup). Takes precedence
+# over langgraph_enabled. Disable to fall back to the 4-phase loop.
+supervisor_enabled: true
+
 # LLM (override per-deployment via env var)
 llm:
   provider: ollama
@@ -59,3 +64,53 @@ checkpointer:
 observability:
   otlp_endpoint: http://otel-collector:4317
   log_level: INFO
+
+# ── AgentTeam 编排 (Phase 6) ──────────────────────────────────────────
+# 复杂查询自动路由到多 agent 协作（compose→execute→synthesize）。
+# 开启后，复杂度判定为 complex 的 turn 走 agent_team 而非 plan_execute。
+agent_team:
+  enabled: true
+  max_agents: 4
+  default_agent_mode: chat
+
+# ── Bash tool (Phase 3-A) ─────────────────────────────────────────────
+# Replaces the coarse 'bash' tool from builtin.py with two privilege-
+# separated tools: bash_read (allowlist) + bash_write (blocklist + ulimit).
+bash:
+  enabled: true
+  read_timeout_seconds: 10
+  write_timeout_seconds: 30
+  write_memory_limit_mb: 256
+  sandbox_root: ""             # empty = reuse tools/sandbox.SANDBOX_ROOT
+  full_access: false           # true disables cwd lock (dev only, never prod)
+
+# ── MCP integration (Phase 3-B) ───────────────────────────────────────
+# Default OFF. When enabled, build_supervisor starts a McpClientManager
+# that spawns each configured server (stdio/sse/http), lists its tools,
+# and registers them into the global ToolRegistry with prefix
+# `mcp.{server_name}.{tool_name}`.
+mcp:
+  enabled: false
+  servers:
+    - name: filesystem
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      env: {}
+      transport: stdio
+      timeout_seconds: 60
+      connect_timeout_seconds: 30
+    # ── Examples (uncomment + configure to enable) ───────────────────
+    # - name: github
+    #   command: npx
+    #   args: ["-y", "@modelcontextprotocol/server-github"]
+    #   env:
+    #     GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
+    #   transport: stdio
+    # - name: remote_api
+    #   url: https://my-mcp-server.example.com/mcp
+    #   transport: http
+    #   timeout_seconds: 30
+    # - name: legacy_sse
+    #   url: https://legacy.example.com/sse
+    #   transport: sse
+

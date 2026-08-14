@@ -30,6 +30,8 @@ services:
     volumes:
       - ./server/paradise/config.prod.yaml:/app/server/paradise/config.prod.yaml:ro
       - paradise_logs:/app/server/logs
+      # Phase 5: persistent workspace + checkpoints + ATIF + summaries
+      - paradise_data:/app/server/data
     depends_on:
       redis:
         condition: service_healthy
@@ -107,4 +109,5 @@ volumes:
   qdrant_data:
   postgres_data:
   paradise_logs:
+  paradise_data:
   otel_data:
