@@ -29,10 +29,31 @@ import json
 import logging
 import os
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+# ── Current-conversation binding (ContextVar) ──────────────────────
+# context_compact tool needs to "auto-take" the current conversation history
+# without the LLM passing it as a huge argument. agent_handler binds the
+# active {conv_id, messages} here before each turn; the tool handler reads
+# it back. Mirrors the streaming sink pattern (paradise.core.streaming):
+# lives in task context, invisible to graph serialization, None when unwired.
+_current_conversation: ContextVar[dict | None] = ContextVar(
+    "paradise_current_conversation", default=None
+)
+
+
+def bind_current_conversation(conv_id: str, messages: list[dict]) -> None:
+    """Bind the active conversation so tools can auto-access current history."""
+    _current_conversation.set({"conv_id": conv_id, "messages": messages})
+
+
+def get_current_conversation() -> dict | None:
+    """Return the bound conversation, or None when no active turn."""
+    return _current_conversation.get()
 
 # ── Token estimation ─────────────────────────────────────────────────
 
@@ -59,6 +80,7 @@ _MODEL_WINDOWS: dict[str, int] = {
 
 _DEFAULT_WINDOW = 8192  # fallback for unknown models
 _COMPACT_THRESHOLD = 0.5  # compact at 50% window
+_DROP_THRESHOLD = 0.8  # drop oldest history at 80% window
 _COMPACT_CHUNK_TURNS = 3  # group ~3 round-trip turns per summary chunk
 _SUMMARY_MAX_TOKENS = 150  # max tokens for each summary
 _ESTIMATED_SYSTEM_PROMPT_TOKENS = 300  # reserve for system prompt + tools
@@ -126,6 +148,10 @@ def get_model_window(model_name: str) -> int:
 
 # ── Summary Index ────────────────────────────────────────────────────
 
+# Summary entries older than this are pruned (memory + disk). Default 15 days.
+_DEFAULT_TTL_SECONDS = 15 * 24 * 3600
+
+
 class SummaryIndex:
     """Index: summary_id → original messages + metadata.
 
@@ -133,14 +159,19 @@ class SummaryIndex:
     ``data/summaries/{conv_id}.json`` so they survive process restarts.
     On first access to a conv_id not yet in memory, the index lazy-loads
     its JSON file from disk. Writes happen on every ``store()`` call.
+
+    TTL: entries older than ``ttl_seconds`` are pruned lazily on read
+    (memory) and via ``prune_all()`` (disk files). ``remove_conv`` drops
+    a whole conversation on session teardown.
     """
 
-    def __init__(self):
+    def __init__(self, data_dir: str | None = None,
+                 ttl_seconds: float = _DEFAULT_TTL_SECONDS):
         self._entries: dict[str, dict] = {}
         self._conv_indices: dict[str, list[str]] = {}  # conv_id → [summary_ids]
-        self._persist_dir = Path(
-            os.getenv("PARADISE_DATA_DIR", "data")
-        ) / "summaries"
+        self._ttl_seconds = ttl_seconds
+        base = data_dir or os.getenv("PARADISE_DATA_DIR", "data")
+        self._persist_dir = Path(base) / "summaries"
         self._persist_dir.mkdir(parents=True, exist_ok=True)
 
     def store(self, conv_id: str, chunk_id: str, original_messages: list[dict],
@@ -170,10 +201,11 @@ class SummaryIndex:
         """Get all summaries for a conversation, oldest first.
 
         Lazy-loads from disk on first access for a conv_id not yet
-        seen in this process.
+        seen in this process. Prunes expired entries before returning.
         """
         if conv_id not in self._conv_indices:
             self._load_conv(conv_id)
+        self._prune_expired(conv_id)
         ids = self._conv_indices.get(conv_id, [])
         return [self._entries[sid] for sid in ids if sid in self._entries]
 
@@ -189,6 +221,50 @@ class SummaryIndex:
         except Exception as e:
             logger.debug("SummaryIndex remove file failed %s: %s", conv_id, e)
 
+    def _prune_expired(self, conv_id: str) -> None:
+        """Drop entries older than ttl_seconds from memory.
+
+        Disk sync happens on the next _persist_conv (writes the pruned
+        list, or removes the file when empty).
+        """
+        ids = self._conv_indices.get(conv_id, [])
+        if not ids:
+            return
+        now = time.time()
+        kept: list[str] = []
+        for sid in ids:
+            entry = self._entries.get(sid)
+            if entry is None:
+                continue  # dangling id — drop it
+            if now - entry.get("created_at", 0) > self._ttl_seconds:
+                self._entries.pop(sid, None)
+            else:
+                kept.append(sid)
+        if len(kept) != len(ids):
+            self._conv_indices[conv_id] = kept
+            logger.info(
+                "SummaryIndex pruned %d expired entries for %s",
+                len(ids) - len(kept), conv_id,
+            )
+
+    def prune_all(self) -> int:
+        """Remove expired summary files from disk (startup/periodic cleanup).
+
+        Uses file mtime as the age signal — cheap and doesn't require
+        loading each JSON. Returns number of files removed.
+        """
+        now = time.time()
+        removed = 0
+        for fpath in self._persist_dir.glob("*.json"):
+            try:
+                if now - fpath.stat().st_mtime > self._ttl_seconds:
+                    fpath.unlink(missing_ok=True)
+                    removed += 1
+                    logger.info("SummaryIndex pruned expired file %s", fpath.name)
+            except Exception as e:
+                logger.debug("SummaryIndex prune failed %s: %s", fpath, e)
+        return removed
+
     def render_context(self, conv_id: str, limit: int = 10) -> str:
         """Render all summaries as a compact context block for the system prompt."""
         summaries = self.get_summaries_for_conv(conv_id)
@@ -203,10 +279,16 @@ class SummaryIndex:
     # ── Phase 5: disk persistence ──────────────────────────────────
 
     def _persist_conv(self, conv_id: str) -> None:
-        """Write this conversation's summaries to a JSON file."""
+        """Write this conversation's summaries to a JSON file.
+
+        Removes the file when the pruned entry list is empty.
+        """
         entries = self.get_summaries_for_conv(conv_id)
         fpath = self._persist_dir / f"{conv_id}.json"
         try:
+            if not entries:
+                fpath.unlink(missing_ok=True)
+                return
             fpath.write_text(
                 json.dumps(entries, ensure_ascii=False),
                 encoding="utf-8",
@@ -241,12 +323,16 @@ class ContextCompactor:
 
     def __init__(self, model_name: str = "qwen2.5:7b",
                  llm_call: Callable | None = None,
-                 threshold: float = _COMPACT_THRESHOLD):
+                 threshold: float = _COMPACT_THRESHOLD,
+                 summary_model: str | None = None,
+                 index: SummaryIndex | None = None):
         self.model_name = model_name
         self._window = get_model_window(model_name)
         self._threshold = threshold
         self._llm_call = llm_call  # async callable: (system_prompt, user_prompt) → str
         self._max_tokens = int(self._window * self._threshold)
+        self._summary_model = summary_model  # None → SUMMARY_MODEL env / default
+        self._index = index or summary_index  # injectable store (default global)
 
     @property
     def window_size(self) -> int:
@@ -307,7 +393,7 @@ class ContextCompactor:
                 chunk_id = f"chunk_{i + 1}_{hashlib.md5(json.dumps(chunk, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:8]}"
                 start_idx = i * chunk_size
                 end_idx = start_idx + len(chunk) - 1
-                summary_index.store(conv_id, chunk_id, chunk, summary, start_idx, end_idx)
+                self._index.store(conv_id, chunk_id, chunk, summary, start_idx, end_idx)
                 summaries.append({
                     "chunk_id": chunk_id,
                     "summary": summary,
@@ -401,7 +487,7 @@ class ContextCompactor:
 
         conversation = "\n".join(lines)
         ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        model = os.getenv("SUMMARY_MODEL", "qwen2.5:3b")
+        model = self._summary_model or os.getenv("SUMMARY_MODEL", "qwen2.5:3b")
 
         payload = {
             "model": model,
@@ -445,27 +531,141 @@ def get_compactor(model_name: str = "qwen2.5:7b",
     return _compactor
 
 
-# ── context_expand Tool (registered in paradise registry) ────────────
+# ── Context Compaction Service (hybrid: auto + LLM tools) ───────────
 
-def _handle_context_expand(args: dict[str, Any]) -> str:
-    """Expand a conversation summary to reveal original messages.
+class ContextCompactionService:
+    """Unified context compaction — two-tier threshold + LLM tools.
 
-    Registered as tool "context_expand" in toolset "context".
+    Hybrid model (Claude Code-like):
+      * System auto-compact: usage >= compact_threshold (0.5) → summarize
+        older history into SummaryIndex; usage >= drop_threshold (0.8) →
+        drop oldest history outright.
+      * LLM-triggered tools: context_compact (summarize current history on
+        demand) + context_expand (reveal a summary's original messages).
+
+    Injectable: holds its own SummaryIndex + ContextCompactor so multiple
+    runtimes don't share one global singleton (previous design).
     """
-    summary_id = args.get("summary_id", "")
-    if not summary_id:
-        return json.dumps({"error": "summary_id is required"}, ensure_ascii=False)
 
-    entry = summary_index.get(summary_id)
+    def __init__(
+        self,
+        model_name: str = "qwen2.5:7b",
+        summary_model: str | None = None,
+        data_dir: str | None = None,
+        compact_threshold: float = _COMPACT_THRESHOLD,
+        drop_threshold: float = _DROP_THRESHOLD,
+        index: SummaryIndex | None = None,
+        llm_call: Callable | None = None,
+    ) -> None:
+        self.index = index or SummaryIndex(data_dir=data_dir)
+        self.compactor = ContextCompactor(
+            model_name=model_name, summary_model=summary_model, llm_call=llm_call,
+            threshold=compact_threshold, index=self.index,
+        )
+        self.compact_threshold = compact_threshold
+        self.drop_threshold = drop_threshold
+
+    # ── System auto-compact (Claude Code-like) ──────────────────────
+
+    def should_compact(self, messages: list[dict]) -> bool:
+        return self.compactor.should_compact(messages)
+
+    def should_drop(self, messages: list[dict]) -> bool:
+        return self.compactor.current_usage_ratio(messages) >= self.drop_threshold
+
+    async def compact(self, messages: list[dict], conv_id: str) -> list[dict]:
+        """Threshold 1: summarize older history via LLM."""
+        return await self.compactor.compact(messages, conv_id)
+
+    def drop(self, messages: list[dict]) -> list[dict]:
+        """Threshold 2: drop oldest turns until below drop_threshold.
+
+        Drops full turns (2 messages at a time) from the front, always
+        keeping the last 4 messages so a minimal context remains.
+        """
+        result = list(messages)
+        while (
+            len(result) > 4
+            and self.compactor.current_usage_ratio(result) >= self.drop_threshold
+        ):
+            result = result[2:] if len(result) >= 2 else result[1:]
+        return result
+
+    def render(self, conv_id: str) -> str:
+        """Render <summary id> blocks for system-prompt injection."""
+        return self.index.render_context(conv_id)
+
+    # ── LLM-triggered tools ─────────────────────────────────────────
+
+    def expand(self, summary_id: str) -> str:
+        """context_expand: reveal a summary's original messages."""
+        return _render_expanded_messages(self.index, summary_id)
+
+    async def compact_current(self, conv_id: str | None = None) -> dict:
+        """context_compact: summarize current history on demand.
+
+        Auto-takes the active conversation from the ContextVar (bound by
+        agent_handler each turn). Returns {summary_id, summary, message_count}.
+        """
+        conv = get_current_conversation()
+        if conv is None:
+            return {"error": "no active conversation to compact"}
+        cid = conv_id or conv.get("conv_id", "")
+        messages = conv.get("messages") or []
+        if not messages:
+            return {"error": "empty conversation"}
+
+        summary = await self.compactor._summarize_chunk(messages, 1, 1)
+        if not summary:
+            return {"error": "summarization failed"}
+
+        digest = hashlib.md5(
+            json.dumps(messages, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()[:8]
+        chunk_id = f"chunk_llm_{int(time.time())}_{digest}"
+        summary_id = self.index.store(
+            cid, chunk_id, messages, summary, 0, len(messages) - 1,
+        )
+        return {
+            "summary_id": summary_id,
+            "summary": summary,
+            "message_count": len(messages),
+        }
+
+
+# Global service instance (initialized with model at runtime)
+_service: ContextCompactionService | None = None
+
+
+def get_compaction_service(
+    model_name: str = "qwen2.5:7b",
+    summary_model: str | None = None,
+) -> ContextCompactionService:
+    """Get or create the global ContextCompactionService instance.
+
+    Shares the module-level ``summary_index`` so the system auto-compact
+    path (agent_handler → service.compact) and the tool handlers
+    (context_expand / context_compact) read/write the SAME store.
+    """
+    global _service
+    if _service is None or _service.compactor.model_name != model_name:
+        _service = ContextCompactionService(
+            model_name=model_name, summary_model=summary_model,
+            index=summary_index,
+        )
+    return _service
+
+
+def _render_expanded_messages(index: SummaryIndex, summary_id: str) -> str:
+    """Render a summary's original messages as readable text (for expand)."""
+    entry = index.get(summary_id)
     if not entry:
+        conv = summary_id.rsplit("_", 1)[0] if "_chunk_" in summary_id else summary_id
         return json.dumps({
             "error": f"summary not found: {summary_id}",
-            "available_summaries": list(summary_index._conv_indices.get(
-                summary_id.rsplit("_", 1)[0] if "_chunk_" in summary_id else summary_id, []
-            )),
+            "available_summaries": list(index._conv_indices.get(conv, [])),
         }, ensure_ascii=False)
 
-    # Render original messages
     lines = [f"展开摘要: {summary_id}\n"]
     for msg in entry["messages"]:
         role = msg.get("role", "unknown")
@@ -477,6 +677,19 @@ def _handle_context_expand(args: dict[str, Any]) -> str:
         lines.append(f"{prefix}: {content}")
 
     return "\n".join(lines)
+
+
+# ── context_expand Tool (registered in paradise registry) ────────────
+
+def _handle_context_expand(args: dict[str, Any]) -> str:
+    """Expand a conversation summary to reveal original messages.
+
+    Registered as tool "context_expand" in toolset "context".
+    """
+    summary_id = args.get("summary_id", "")
+    if not summary_id:
+        return json.dumps({"error": "summary_id is required"}, ensure_ascii=False)
+    return _render_expanded_messages(get_compaction_service().index, summary_id)
 
 
 CONTEXT_EXPAND_SCHEMA = {
@@ -511,4 +724,42 @@ registry.register(
     description="Expand a conversation summary to view original messages",
     emoji="📂",
     max_result_size_chars=10000,
+)
+
+
+async def _handle_context_compact(args: dict[str, Any]) -> str:
+    """Summarize the current conversation history into a stored summary.
+
+    Registered as tool "context_compact" in toolset "context".
+    Auto-takes the active conversation from the ContextVar (no LLM-visible
+    arguments needed) and stores {summary_id → summary + original messages}.
+    """
+    service = get_compaction_service()
+    result = await service.compact_current()
+    return json.dumps(result, ensure_ascii=False)
+
+
+CONTEXT_COMPACT_SCHEMA = {
+    "name": "context_compact",
+    "description": (
+        "Summarize the current conversation history into key points and store "
+        "them as a retrievable summary. Use this when the conversation is long "
+        "and you need to compress it to free context. Returns a summary_id "
+        "that can later be expanded via context_expand."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+    },
+}
+
+registry.register(
+    name="context_compact",
+    toolset="context",
+    schema=CONTEXT_COMPACT_SCHEMA,
+    handler=_handle_context_compact,
+    is_async=True,
+    description="Summarize current conversation history into a stored summary",
+    emoji="🗜️",
+    max_result_size_chars=8000,
 )

@@ -138,6 +138,14 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(warmup_agent())
     # Initialize proactive scheduler (ported from feat/live2d-interact-tab)
     _init_proactive()
+    # Phase 6: prune expired compaction-summary files (TTL 15 days) from disk
+    try:
+        from context_compactor import get_compaction_service
+        _pruned = get_compaction_service().index.prune_all()
+        if _pruned:
+            logger.info("Pruned %d expired compaction-summary files", _pruned)
+    except Exception:
+        logger.warning("Compaction-summary prune failed", exc_info=True)
     yield
     # Shutdown
     from agent_handler import session_manager

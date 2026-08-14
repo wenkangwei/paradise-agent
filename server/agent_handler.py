@@ -23,7 +23,7 @@ from paradise.core.channel import Channel
 from paradise.core.context import LoopContext
 
 from turn_logger import TurnRecorder, TrainingExporter
-from context_compactor import get_compactor, estimate_messages_tokens, summary_index
+from context_compactor import get_compaction_service, bind_current_conversation
 from model_router import detect_model, ToolRouter, ModelCap
 
 logger = logging.getLogger("agent_handler")
@@ -219,6 +219,12 @@ class AgentSessionManager:
             self._turn_counters.pop(conv_id, None)
             if hasattr(self, '_channels'):
                 self._channels.pop(conv_id, None)
+            # Phase 6: drop this conversation's compaction summaries
+            # (folded history) on session teardown — no orphaned files.
+            try:
+                get_compaction_service().index.remove_conv(conv_id)
+            except Exception:
+                pass
 
     def get_turn_count(self, conv_id: str) -> int:
         return self._turn_counters.get(conv_id, 0)
@@ -450,24 +456,35 @@ async def process_message_stream(
     if model_cap.is_multimodal:
         ctx._skip_vision_tool = True
 
-    # ── Context compaction ───────────────────────────────────────────
-    # Check if conversation context exceeds 50% of model window.
-    # If so, compact older messages into summaries (fold/expand model).
-    compactor = get_compactor(model_name)
-    usage = compactor.current_usage_ratio(messages)
+    # ── Context compaction (two-tier: compact → drop) ────────────────
+    # Claude Code-like: usage >= compact_threshold (0.5) → summarize older
+    # history into SummaryIndex; usage >= drop_threshold (0.8) → drop oldest
+    # history outright. The active conversation is bound to a ContextVar so
+    # the context_compact tool can auto-access current history when the LLM
+    # proactively compresses context.
+    service = get_compaction_service(model_name)
+    bind_current_conversation(conv_id, messages)
+    usage = service.compactor.current_usage_ratio(messages)
     _compact_context = ""
-    if compactor.should_compact(messages):
-        logger.info(
-            "Context at %.0f%% of %d window — compacting (conv=%s, msgs=%d)",
-            usage * 100, compactor.window_size, conv_id, len(messages),
-        )
-        try:
-            messages = await compactor.compact(messages, conv_id)
-            _compact_context = summary_index.render_context(conv_id)
+    try:
+        if service.should_drop(messages):
+            logger.info(
+                "Context at %.0f%% of window — dropping oldest history (conv=%s, msgs=%d)",
+                usage * 100, conv_id, len(messages),
+            )
+            messages = service.drop(messages)
+            logger.info("Dropped to %d messages", len(messages))
+        elif service.should_compact(messages):
+            logger.info(
+                "Context at %.0f%% of window — compacting (conv=%s, msgs=%d)",
+                usage * 100, conv_id, len(messages),
+            )
+            messages = await service.compact(messages, conv_id)
+            _compact_context = service.render(conv_id)
             logger.info("Compacted to %d messages", len(messages))
-        except Exception as e:
-            logger.warning("Context compaction failed: %s", e)
-            # Continue with original messages
+    except Exception as e:
+        logger.warning("Context compaction failed: %s", e)
+        # Continue with original messages
 
     # All models use pre-analysis — strip image_url parts from messages
     if has_images:
