@@ -43,6 +43,12 @@ DEFAULT_RULES: list[tuple[str, Intent, float]] = [
     (r"(google一下|bing一下|search\s+for)",                           Intent.TOOL_SEARCH,  0.9),
     (r"(最新.*新闻|热点|trending)",                                   Intent.TOOL_SEARCH,  0.8),
 
+    # ── Tool: explicit command / file operations ─────────────────────
+    (r"(执行|运行|调用|使用).{0,4}(命令|bash|shell|脚本|工具)",       Intent.TOOL_SEARCH,  0.88),
+    (r"(查看|列出|显示|读取|打开).{0,4}(目录|文件|文件夹|路径|列表)", Intent.TOOL_SEARCH,  0.85),
+    (r"\b(bash|shell|terminal|cmd|ls|cat|grep|find|python|node)\b", Intent.TOOL_SEARCH,  0.8),
+    (r"(删除|创建|修改|移动|复制|下载|上传|安装)",                    Intent.TOOL_SEARCH,  0.8),
+
     # ── Tool: weather ──────────────────────────────────────────────────
     (r"(天气|气温|下雨吗|温度多少)",                                  Intent.TOOL_WEATHER, 0.9),
     (r"\b(weather|forecast)\b",                                       Intent.TOOL_WEATHER, 0.9),

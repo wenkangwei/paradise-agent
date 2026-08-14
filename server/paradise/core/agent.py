@@ -242,6 +242,162 @@ class ParadiseAgent:
         async for event in stream_graph_events(compiled, initial_state, thread_id):
             yield event
 
+    # ── Supervisor path (Phase 2.9, prod-only) ──────────────────
+    # Activated when ParadiseConfig.supervisor_enabled is True. Routes
+    # through intent → mode-select → subgraph (Handoff Protocol) →
+    # reflect → cleanup. Coexists with run_via_graph and handle_message.
+
+    async def run_via_supervisor(
+        self,
+        ctx: LoopContext,
+        checkpointer=None,
+    ) -> AsyncGenerator[dict, None]:
+        """Run the supervisor pipeline with real-time event streaming.
+
+        Yields events compatible with handle_message / run_via_graph so
+        agent_handler._feed_events can use any of the three paths.
+
+        Phase 3-C streaming architecture:
+          * An asyncio.Queue is bound via ContextVar (paradise.core.streaming)
+            before spawning the supervisor task.
+          * intent_node emits {"type":"intent",...} as soon as classification
+            completes — not after the whole supervisor finishes.
+          * tool_react think_act_node emits {"type":"tool_call",...} per
+            tool dispatch, with arguments + result + duration_ms.
+          * This method drains the queue concurrently while
+            compiled.ainvoke() runs in a background task, forwarding each
+            event to the caller immediately.
+          * The final {"type":"done",...} is synthesized from the
+            supervisor's terminal state after the background task joins.
+
+        Event shape emitted (in order):
+            {"type": "intent",    "content": str, "confidence": float, "source": str, "mode": str}
+            {"type": "tool_call", "name": str, "arguments": dict, "result": str, "duration_ms": int}  # 0..N
+            {"type": "done",      "content": str}                    # final_output
+            {"type": "error",     "content": str}                    # on failure
+        """
+        from paradise.factory import build_supervisor
+
+        self._last_interaction_time = time.monotonic()
+        self.emotion_engine.on_interaction(self.emotion_state, is_positive=True)
+        self.workspace.save_state(self.emotion_state.to_dict())
+
+        compiled, registry, mcp_manager = build_supervisor(
+            self.config,
+            checkpointer=checkpointer,
+            agent_id=self.agent_id,
+            workspace=self.workspace,
+        )
+        if compiled is None:
+            # Fail-soft: build_supervisor caught an exception and returned
+            # (None, None, None). Surface an error event and let the caller
+            # fall back to a different path. Don't raise.
+            if mcp_manager is not None:
+                try:
+                    await mcp_manager.aclose()
+                except Exception:
+                    pass
+            yield {"type": "error",
+                   "content": "supervisor graph unavailable; check logs"}
+            return
+
+        trace_id = f"{self.agent_id}:{ctx.session_id or 'default'}"
+        event_sink: asyncio.Queue = asyncio.Queue()
+        # Bind the sink via ContextVar so nodes inside invoke_task can emit
+        # events without the Queue ever entering serializable graph state
+        # (msgpack crashes on non-serializable types like asyncio.Queue).
+        # create_task copies the current context at spawn time, so the bound
+        # value is visible to all nodes running inside the task.
+        from paradise.core.streaming import set_event_sink
+
+        set_event_sink(event_sink)
+
+        initial_state: dict = {
+            "user_message": ctx.user_message,
+            "agent_id": self.agent_id,
+            "session_id": ctx.session_id or "",
+            "trace_id": trace_id,
+            "user_id": ctx.session_id or "",  # no separate user_id in LoopContext
+            "user_tier": "free",
+            # Phase 3-D: context bags propagated from LoopContext so
+            # subgraphs (chat, tool_react, plan_execute) receive persona,
+            # memory, conversation history, and compact context.
+            # Dynamic attrs (_raw_messages, _compact_context, _user_profile)
+            # are set by agent_handler before calling run_via_supervisor.
+            "conversation_history": getattr(ctx, '_raw_messages', []) or [],
+            "compact_context": getattr(ctx, '_compact_context', "") or "",
+            "soul_md": getattr(ctx, 'soul_md', "") or "",
+            "memory_md": getattr(ctx, 'memory_md', "") or "",
+            "user_profile": getattr(ctx, '_user_profile', "") or "",
+        }
+        # Fall back to workspace files when LoopContext didn't carry
+        # persona/memory (mirrors _think_phase behavior). Guard with
+        # hasattr/try for test stubs that bypass __init__ (no workspace).
+        if not initial_state["soul_md"] and hasattr(self, 'workspace'):
+            try:
+                initial_state["soul_md"] = self.workspace.read_md("soul")
+            except Exception:
+                pass
+        if not initial_state["memory_md"] and hasattr(self, 'workspace'):
+            try:
+                initial_state["memory_md"] = self.workspace.read_md("memory")
+            except Exception:
+                pass
+        config = {"configurable": {"thread_id": trace_id}}
+
+        invoke_task = asyncio.create_task(
+            compiled.ainvoke(initial_state, config=config)
+        )
+
+        try:
+            # Concurrent drain: yield events as they land in the queue
+            # while the supervisor runs in the background. Poll with a
+            # short timeout so we notice when invoke_task finishes even
+            # if no more events are enqueued (e.g., chat mode produces
+            # only an intent event then goes quiet until done).
+            final_state: dict | None = None
+            while True:
+                try:
+                    evt = await asyncio.wait_for(event_sink.get(), timeout=0.5)
+                    yield evt
+                except asyncio.TimeoutError:
+                    if invoke_task.done():
+                        break
+                    # Supervisor still running; client sees keep-alive
+                    # from agent_handler's heartbeat. Continue draining.
+
+            # Re-raise any exception captured inside the task
+            final_state = invoke_task.result()
+
+            # Synthesize the terminal done/error event from final_state
+            response = final_state.get("handoff_response")
+            final_output = final_state.get("final_output", "")
+            if response and response.status == "error" and not final_output:
+                yield {"type": "error",
+                       "content": response.error or "unknown error"}
+            else:
+                yield {"type": "done", "content": final_output}
+        except Exception as exc:
+            # Supervisor graph crashed (transport error, node bug, etc.)
+            logger.exception("supervisor crashed trace=%s", trace_id)
+            yield {"type": "error",
+                   "content": f"supervisor crashed: {exc}"}
+        finally:
+            # Phase 3-B: always close MCP manager so background subprocesses
+            # don't leak. aclose() is itself fail-soft.
+            set_event_sink(None)  # clear streaming channel for this task
+            if invoke_task is not None and not invoke_task.done():
+                invoke_task.cancel()
+                try:
+                    await invoke_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if mcp_manager is not None:
+                try:
+                    await mcp_manager.aclose()
+                except Exception:
+                    pass
+
     # ── Phase 1: TOOL ────────────────────────────────────────────
 
     async def _tool_phase(self, ctx: LoopContext):

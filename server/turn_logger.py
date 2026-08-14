@@ -150,57 +150,156 @@ class TurnRecorder:
     def to_training_entry(self) -> dict | None:
         """Convert this turn into a cleaned SFT/ORPO training entry.
 
-        Returns None if the turn is not suitable for training
-        (e.g. error, too short, tool-call-only).
+        Returns None if the turn is too short to be useful.
+
+        Supports both plain chat turns and tool-call turns. Tool-call turns
+        produce an ATIF-compatible multi-message structure:
+            user → assistant(tool_calls) → tool → assistant(final_answer)
+        plus a `trajectory` field for downstream RL training.
+
+        Schema: aichat-1.0 (ATIF-compatible; full ATIF migration is W2).
         """
-        if self._tool_calls_count > 0:
-            return None  # Skip tool-call turns for now (future: tool-use SFT)
         if len(self._final_content.strip()) < 10:
-            return None  # Too short to be useful
+            return None
 
-        # Extract user message text
-        user_text = ""
-        for evt in self._input_events:
-            if evt.get("type") == "user_message":
-                cp = evt.get("content_preview", "")
-                if isinstance(cp, str):
-                    user_text = cp
-                elif isinstance(cp, list):
-                    # Extract text parts only
-                    parts = []
-                    for item in cp:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            parts.append(item.get("text", ""))
-                    user_text = " ".join(parts)
-                break
+        user_text = self._extract_user_text()
+        thinking = next(
+            (evt.get("content", "") for evt in self._output_events
+             if evt.get("type") == "thinking"),
+            "",
+        )
 
-        # Extract thinking
-        thinking = ""
-        for evt in self._output_events:
-            if evt.get("type") == "thinking":
-                thinking = evt.get("content", "")
+        messages, trajectory, tools_used = self._build_messages(user_text, thinking)
+        if len(messages) < 2:
+            return None
 
-        messages = [
-            {"role": "user", "content": user_text},
-        ]
-        if thinking:
-            messages.append({"role": "assistant", "content": self._final_content, "thinking": thinking[:1000]})
-        else:
-            messages.append({"role": "assistant", "content": self._final_content})
-
-        return {
+        entry: dict[str, Any] = {
             "conversation_id": self._conv_id,
             "turn": self._turn,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "model": self._input_events[0].get("model", "") if self._input_events else "",
+            "schema_version": "aichat-1.0",
             "messages": messages,
             "metadata": {
                 "has_attachments": bool(self._input_events[0].get("attachments")) if self._input_events else False,
-                "tools_used": [],
+                "tools_used": tools_used,
+                "tool_calls_count": self._tool_calls_count,
                 "total_tokens": self._token_estimate,
                 "duration_ms": round((time.time() - self._start_ts) * 1000, 1),
+                "environment": os.getenv("APP_ENV", "dev"),
             },
         }
+        if trajectory:
+            entry["trajectory"] = trajectory
+        return entry
+
+    def _extract_user_text(self) -> str:
+        """Pull the user's text from the first user_message input event."""
+        for evt in self._input_events:
+            if evt.get("type") != "user_message":
+                continue
+            cp = evt.get("content_preview", "")
+            if isinstance(cp, str):
+                return cp
+            if isinstance(cp, list):
+                parts = [
+                    item.get("text", "")
+                    for item in cp
+                    if isinstance(item, dict) and item.get("type") == "text"
+                ]
+                return " ".join(parts)
+            break
+        return ""
+
+    def _build_messages(
+        self, user_text: str, thinking: str
+    ) -> tuple[list[dict], list[dict], list[str]]:
+        """Reconstruct OpenAI/ATIF-compatible messages list.
+
+        For tool-call turns, splits content around tool_calls:
+          - assistant(tool_calls) carrying pre-tool reasoning (if any)
+          - one role=tool message per tool_call
+          - final assistant message with post-tool answer
+
+        Returns (messages, trajectory, tools_used).
+        """
+        messages: list[dict] = [{"role": "user", "content": user_text}]
+        trajectory: list[dict] = []
+        tools_used: list[str] = []
+
+        if self._tool_calls_count == 0:
+            # Plain chat turn — single assistant message (legacy behaviour)
+            asst_msg: dict[str, Any] = {"role": "assistant", "content": self._final_content}
+            if thinking:
+                asst_msg["thinking"] = thinking[:1000]
+            messages.append(asst_msg)
+            return messages, trajectory, tools_used
+
+        # Tool-call turn — walk output events in order, split content around tool_calls.
+        pre_tool_text = ""
+        post_tool_text = ""
+        seen_tool = False
+        for evt in self._output_events:
+            t = evt.get("type")
+            if t == "tool_call":
+                seen_tool = True
+            elif t == "content_delta":
+                if seen_tool:
+                    post_tool_text += evt.get("text", "")
+                else:
+                    pre_tool_text += evt.get("text", "")
+
+        # Assistant message with tool_calls (carries pre-tool reasoning, if any).
+        asst_msg: dict[str, Any] = {"role": "assistant", "content": pre_tool_text}
+        if thinking:
+            asst_msg["thinking"] = thinking[:1000]
+
+        tool_calls_payload: list[dict] = []
+        tool_results: list[str] = []
+        tc_counter = 0
+        for evt in self._output_events:
+            if evt.get("type") != "tool_call":
+                continue
+            tc_id = f"call_{self._turn}_{tc_counter}"
+            tc_counter += 1
+            name = evt.get("name", "")
+            args = evt.get("arguments", {}) or {}
+            result = evt.get("result", "")
+            duration = evt.get("duration_ms", 0)
+            tools_used.append(name)
+            tool_calls_payload.append({
+                "id": tc_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(args, ensure_ascii=False),
+                },
+            })
+            tool_results.append(result)
+            trajectory.append({
+                "action": "tool_call",
+                "name": name,
+                "arguments": args,
+                "result": result,
+                "duration_ms": duration,
+            })
+
+        asst_msg["tool_calls"] = tool_calls_payload
+        messages.append(asst_msg)
+
+        # Tool result messages (role=tool, one per call, order matched by id).
+        for i, tc in enumerate(tool_calls_payload):
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": tool_results[i],
+            })
+
+        # Final assistant message with post-tool answer (if any).
+        if post_tool_text.strip():
+            messages.append({"role": "assistant", "content": post_tool_text})
+
+        return messages, trajectory, tools_used
 
 
 class TrainingExporter:

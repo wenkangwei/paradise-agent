@@ -41,14 +41,45 @@ class OllamaNativeTransport(ProviderTransport):
         system_prompt: Optional[str] = None,
         **kwargs,
     ) -> List[Dict[str, Any]]:
-        """Prepend system message (if provided) to the message list.
+        """Prepend system message and fix tool_call arguments format.
 
-        Ollama uses the same message format as OpenAI, so no other conversion
-        is needed.
+        Ollama differs from OpenAI in one critical way: the ``arguments``
+        field inside assistant ``tool_calls`` must be a JSON **object**,
+        not a JSON **string**. OpenAI (and paradise's internal ToolCall)
+        uses strings, so we must parse them back to dicts before sending.
+
+        Without this fix, ollama returns:
+            {"error": "Value looks like object, but can't find closing '}'"}
+        on any request that includes a prior assistant tool_call message.
         """
+        converted: list[dict[str, Any]] = []
+        for msg in messages:
+            m = dict(msg)  # shallow copy — don't mutate caller's list
+            tool_calls = m.get("tool_calls")
+            if tool_calls and isinstance(tool_calls, list):
+                fixed_tcs = []
+                for tc in tool_calls:
+                    tc_copy = dict(tc)
+                    func = tc_copy.get("function", {})
+                    if isinstance(func, dict):
+                        func_copy = dict(func)
+                        args = func_copy.get("arguments")
+                        if isinstance(args, str):
+                            try:
+                                func_copy["arguments"] = json.loads(args)
+                            except json.JSONDecodeError:
+                                # Leave as string if not valid JSON — ollama
+                                # will reject, but at least the error message
+                                # will be meaningful.
+                                pass
+                        tc_copy["function"] = func_copy
+                    fixed_tcs.append(tc_copy)
+                m["tool_calls"] = fixed_tcs
+            converted.append(m)
+
         if system_prompt:
-            return [{"role": "system", "content": system_prompt}] + list(messages)
-        return list(messages)
+            return [{"role": "system", "content": system_prompt}] + converted
+        return converted
 
     def convert_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Pass tools through unchanged — Ollama uses the same format."""
@@ -204,7 +235,7 @@ class OllamaNativeTransport(ProviderTransport):
                             continue
         except httpx.HTTPStatusError as exc:
             raise TransportError(
-                f"Ollama stream HTTP {exc.response.status_code}: {exc.message}",
+                f"Ollama stream HTTP {exc.response.status_code}: {exc.response.text[:200]}",
                 provider="ollama_native",
                 status_code=exc.response.status_code,
             ) from exc
@@ -261,7 +292,7 @@ class OllamaNativeTransport(ProviderTransport):
                 data = resp.json()
         except httpx.HTTPStatusError as exc:
             raise TransportError(
-                f"Ollama chat HTTP {exc.response.status_code}: {exc.message}",
+                f"Ollama chat HTTP {exc.response.status_code}: {exc.response.text[:200]}",
                 provider="ollama_native",
                 status_code=exc.response.status_code,
             ) from exc

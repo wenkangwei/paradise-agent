@@ -91,6 +91,50 @@ def _resolve_langgraph_enabled() -> bool:
 LANGGRAPH_ENABLED = _resolve_langgraph_enabled()
 logger.info("LangGraph+intent routing: enabled=%s (mode=%s)", LANGGRAPH_ENABLED, os.getenv("PARADISE_MODE", "dev"))
 
+# ── Phase 2.9: Supervisor routing flag ──────────────────────────────
+# When True, agent_handler routes through supervisor graph (intent →
+# mode-select → subgraph → reflect → cleanup) instead of run_via_graph
+# or handle_message. Takes precedence over langgraph_enabled.
+def _resolve_supervisor_enabled() -> bool:
+    if os.getenv("PARADISE_MODE", "dev") != "prod":
+        return False
+    env_val = os.getenv("PARADISE_SUPERVISOR_ENABLED", "")
+    if env_val:
+        return env_val.lower() in ("1", "true", "yes")
+    try:
+        from paradise.factory import load_prod_config
+        return load_prod_config().supervisor_enabled
+    except Exception:
+        return False
+
+SUPERVISOR_ENABLED = _resolve_supervisor_enabled()
+logger.info("Supervisor routing: enabled=%s (mode=%s)", SUPERVISOR_ENABLED, os.getenv("PARADISE_MODE", "dev"))
+
+# ── Phase 6: query preprocess / complexity / agent_team wiring ─────
+# agent_handler constructs ParadiseConfig by hand (see get_or_create) and
+# does NOT read config.prod.yaml for the Phase 6 knobs. In prod mode, pull
+# them once here so factory.build_supervisor actually wires the
+# preprocessor, complexity assessor, and (when enabled) AgentTeamPattern.
+_PHASE6_CFG = None
+if os.getenv("PARADISE_MODE", "dev") == "prod":
+    try:
+        from paradise.factory import load_prod_config
+        _pc = load_prod_config()
+        _PHASE6_CFG = {
+            "query_preprocess": _pc.query_preprocess,
+            "complexity": _pc.complexity,
+            "agent_team": _pc.agent_team,
+        }
+        logger.info(
+            "Phase 6 wiring: preprocess=%s complexity=%s agent_team=%s",
+            _PHASE6_CFG["query_preprocess"].enabled,
+            _PHASE6_CFG["complexity"].enabled,
+            _PHASE6_CFG["agent_team"].enabled,
+        )
+    except Exception as exc:
+        logger.warning("Phase 6 config load failed (%s) — using defaults", exc)
+        _PHASE6_CFG = None
+
 # ── Session Manager ───────────────────────────────────────────────
 
 class AgentSessionManager:
@@ -128,7 +172,21 @@ class AgentSessionManager:
                 # classifies the message and routes chitchat/unsafe to the
                 # RESPOND fast path. Other intents run the full 4-phase pipeline.
                 langgraph_enabled=LANGGRAPH_ENABLED,
+                # Phase 2.9: when True, run_via_supervisor() is used →
+                # intent + mode-select + Handoff Protocol + reflect.
+                # Takes precedence over langgraph_enabled.
+                supervisor_enabled=SUPERVISOR_ENABLED,
             )
+
+            # Phase 6: inherit query_preprocess/complexity/agent_team from
+            # config.prod.yaml (prod mode only). get_or_create builds
+            # ParadiseConfig manually and would otherwise leave these at
+            # their defaults — agent_team.enabled=False would never route
+            # complex turns to the multi-agent orchestration.
+            if _PHASE6_CFG is not None:
+                config.query_preprocess = _PHASE6_CFG["query_preprocess"]
+                config.complexity = _PHASE6_CFG["complexity"]
+                config.agent_team = _PHASE6_CFG["agent_team"]
 
             agent = ParadiseAgent(conv_id, config)
             # Skip full initialize() — no workspace files needed for android use case.
@@ -443,11 +501,19 @@ async def process_message_stream(
         async def _feed_events():
             """Pull events from agent and put them in the queue."""
             try:
-                # Phase 2: prod branch can route through LangGraph when enabled.
-                # Dev/main branch path (handle_message) is the default.
-                _use_graph = os.getenv("PARADISE_MODE", "dev") == "prod" and \
+                # Phase 2.9: prod branch with supervisor_enabled takes
+                # precedence over langgraph_enabled. Three-way dispatch:
+                #   supervisor_enabled → run_via_supervisor
+                #   langgraph_enabled  → run_via_graph
+                #   else               → handle_message
+                _is_prod = os.getenv("PARADISE_MODE", "dev") == "prod"
+                _use_supervisor = _is_prod and \
+                    getattr(agent.config, "supervisor_enabled", False)
+                _use_graph = _is_prod and not _use_supervisor and \
                     getattr(agent.config, "langgraph_enabled", False)
-                if _use_graph:
+                if _use_supervisor:
+                    agent_method = agent.run_via_supervisor
+                elif _use_graph:
                     agent_method = agent.run_via_graph
                 else:
                     agent_method = agent.handle_message
@@ -474,7 +540,23 @@ async def process_message_stream(
 
             evt_type = event.get("type", "")
 
-            if evt_type == "thinking":
+            if evt_type == "intent":
+                # Phase 3-C: supervisor emits intent as soon as classification
+                # completes, giving the client early visibility into routing.
+                # Format as reasoning_content so the Android app shows it in
+                # the "thinking" panel (same delta shape as thinking events).
+                intent_label = event.get("content", "unknown")
+                intent_mode = event.get("mode", "chat")
+                intent_info = f"🧭 意图: {intent_label} → 模式: {intent_mode}\n"
+                yield _sse_chunk({
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"reasoning_content": intent_info},
+                        "finish_reason": None,
+                    }],
+                })
+
+            elif evt_type == "thinking":
                 _tick("agent → thinking")
                 if recorder:
                     recorder.thinking(event.get("content", ""))
@@ -564,7 +646,22 @@ async def process_message_stream(
 
             elif evt_type == "done":
                 # Final chunk with finish_reason
-                final_content = event.get("content", "".join(content_full))
+                final_content = event.get("content", "")
+                # Supervisor path: no "content" events were emitted (the
+                # LLM ran inside the subgraph), so the actual response
+                # lives only here. Stream it before the finish marker.
+                # Dev path: content_full already has streamed tokens; skip.
+                if not content_full and final_content:
+                    content_full.append(final_content)
+                    if recorder:
+                        recorder.content_delta(final_content)
+                    yield _sse_chunk({
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": final_content},
+                            "finish_reason": None,
+                        }],
+                    })
                 if recorder:
                     recorder.turn_end("stop")
                     recorder.flush()

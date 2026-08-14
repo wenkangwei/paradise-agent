@@ -31,3 +31,11 @@ __pycache__/
 venv/
 .venv/
 .env
+
+# Vim swap / editor temp
+*.swp
+*.swo
+*~
+
+# Sensitive credentials / session data
+cookies.json

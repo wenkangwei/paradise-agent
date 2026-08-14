@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -126,11 +127,21 @@ def get_model_window(model_name: str) -> int:
 # ── Summary Index ────────────────────────────────────────────────────
 
 class SummaryIndex:
-    """In-memory index: summary_id → original messages + metadata."""
+    """Index: summary_id → original messages + metadata.
+
+    Phase 5: summaries are persisted as per-conv_id JSON files under
+    ``data/summaries/{conv_id}.json`` so they survive process restarts.
+    On first access to a conv_id not yet in memory, the index lazy-loads
+    its JSON file from disk. Writes happen on every ``store()`` call.
+    """
 
     def __init__(self):
         self._entries: dict[str, dict] = {}
         self._conv_indices: dict[str, list[str]] = {}  # conv_id → [summary_ids]
+        self._persist_dir = Path(
+            os.getenv("PARADISE_DATA_DIR", "data")
+        ) / "summaries"
+        self._persist_dir.mkdir(parents=True, exist_ok=True)
 
     def store(self, conv_id: str, chunk_id: str, original_messages: list[dict],
               summary: str, start_index: int, end_index: int) -> str:
@@ -148,6 +159,7 @@ class SummaryIndex:
         if conv_id not in self._conv_indices:
             self._conv_indices[conv_id] = []
         self._conv_indices[conv_id].append(summary_id)
+        self._persist_conv(conv_id)
         return summary_id
 
     def get(self, summary_id: str) -> dict | None:
@@ -155,7 +167,13 @@ class SummaryIndex:
         return self._entries.get(summary_id)
 
     def get_summaries_for_conv(self, conv_id: str) -> list[dict]:
-        """Get all summaries for a conversation, oldest first."""
+        """Get all summaries for a conversation, oldest first.
+
+        Lazy-loads from disk on first access for a conv_id not yet
+        seen in this process.
+        """
+        if conv_id not in self._conv_indices:
+            self._load_conv(conv_id)
         ids = self._conv_indices.get(conv_id, [])
         return [self._entries[sid] for sid in ids if sid in self._entries]
 
@@ -164,6 +182,12 @@ class SummaryIndex:
         ids = self._conv_indices.pop(conv_id, [])
         for sid in ids:
             self._entries.pop(sid, None)
+        # Also remove the persisted JSON file
+        fpath = self._persist_dir / f"{conv_id}.json"
+        try:
+            fpath.unlink(missing_ok=True)
+        except Exception as e:
+            logger.debug("SummaryIndex remove file failed %s: %s", conv_id, e)
 
     def render_context(self, conv_id: str, limit: int = 10) -> str:
         """Render all summaries as a compact context block for the system prompt."""
@@ -175,6 +199,35 @@ class SummaryIndex:
             sid = f"{entry['conv_id']}_{entry['chunk_id']}"
             lines.append(f"<summary id=\"{sid}\">{entry['summary']}</summary>")
         return "\n".join(lines)
+
+    # ── Phase 5: disk persistence ──────────────────────────────────
+
+    def _persist_conv(self, conv_id: str) -> None:
+        """Write this conversation's summaries to a JSON file."""
+        entries = self.get_summaries_for_conv(conv_id)
+        fpath = self._persist_dir / f"{conv_id}.json"
+        try:
+            fpath.write_text(
+                json.dumps(entries, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("SummaryIndex persist failed %s: %s", conv_id, e)
+
+    def _load_conv(self, conv_id: str) -> None:
+        """Load summaries for a conversation from disk (if file exists)."""
+        fpath = self._persist_dir / f"{conv_id}.json"
+        if not fpath.exists():
+            return
+        try:
+            entries = json.loads(fpath.read_text(encoding="utf-8"))
+            for entry in entries:
+                sid = f"{entry['conv_id']}_{entry['chunk_id']}"
+                if sid not in self._entries:
+                    self._entries[sid] = entry
+                    self._conv_indices.setdefault(conv_id, []).append(sid)
+        except Exception as e:
+            logger.warning("SummaryIndex load failed %s: %s", conv_id, e)
 
 
 # Global singleton

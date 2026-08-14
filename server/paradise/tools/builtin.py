@@ -1,6 +1,10 @@
-"""Built-in tools — bash, search_files, read_file.
+"""Built-in tools — search_files, read_file.
 
 Each tool self-registers with the ToolRegistry at import time.
+
+Note: The original ``bash`` tool was replaced in Phase 3-A by
+``bash_read`` + ``bash_write`` in ``paradise/tools/bash_tool.py``.
+This module no longer registers any bash tool.
 """
 
 from __future__ import annotations
@@ -11,33 +15,13 @@ import logging
 from typing import Any
 
 from paradise.tools.sandbox import (
-    safe_path, is_blocked, truncate, is_write_command,
-    contains_blocked_file, SANDBOX_ROOT,
+    safe_path, is_blocked, truncate,
 )
 from paradise.tools.registry import registry, tool_error, tool_result
 
 logger = logging.getLogger(__name__)
 
 # ── Tool schemas ──────────────────────────────────────────────────────
-
-_BASH_SCHEMA = {
-    "name": "bash",
-    "description": (
-        "Execute a bash command. Use for running scripts, checking system info, "
-        "listing files, etc. Output is truncated to 4000 chars. "
-        "Working directory is the agent data sandbox."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "command": {
-                "type": "string",
-                "description": "The bash command to execute",
-            }
-        },
-        "required": ["command"],
-    },
-}
 
 _SEARCH_SCHEMA = {
     "name": "search_files",
@@ -86,40 +70,6 @@ _READ_SCHEMA = {
 
 
 # ── Handlers ──────────────────────────────────────────────────────────
-
-async def _handle_bash(args: dict[str, Any]) -> str:
-    command = args.get("command", "")
-    if not command.strip():
-        return tool_error("empty command")
-
-    if is_write_command(command):
-        return tool_error("write operation not allowed")
-
-    blocked_file = contains_blocked_file(command)
-    if blocked_file:
-        return tool_error(f"{blocked_file} is a protected config file")
-
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(SANDBOX_ROOT),
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-        output = ""
-        if stdout:
-            output += stdout.decode("utf-8", errors="replace")
-        if stderr:
-            output += ("\nSTDERR:\n" + stderr.decode("utf-8", errors="replace")) if output else stderr.decode("utf-8", errors="replace")
-        if not output:
-            output = "(no output)"
-        return truncate(f"$ {command}\n{output}")
-    except asyncio.TimeoutError:
-        return tool_error("command exceeded 10s limit")
-    except Exception as e:
-        return tool_error(str(e))
-
 
 async def _handle_search(args: dict[str, Any]) -> str:
     pattern = args.get("pattern", "*")
@@ -181,15 +131,6 @@ async def _handle_read(args: dict[str, Any]) -> str:
 # ── Self-register with registry ──────────────────────────────────────
 
 registry.register(
-    name="bash",
-    toolset="builtin",
-    schema=_BASH_SCHEMA,
-    handler=_handle_bash,
-    is_async=True,
-    description="Execute bash commands in sandbox",
-)
-
-registry.register(
     name="search_files",
     toolset="builtin",
     schema=_SEARCH_SCHEMA,
@@ -220,7 +161,7 @@ def get_builtin_tool_definitions() -> list[dict]:
     all_names = set(registry.get_all_tool_names())
     if not all_names:
         # Fallback: if discovery hasn't run yet, use known builtins
-        all_names = {"bash", "search_files", "read_file"}
+        all_names = {"search_files", "read_file"}
     return registry.get_definitions(all_names)
 
 
